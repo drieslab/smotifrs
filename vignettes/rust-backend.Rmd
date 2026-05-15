@@ -1,0 +1,307 @@
+---
+title: "Scaling smotif with smotifrs (Rust backend)"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Scaling smotif with smotifrs (Rust backend)}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE, comment = "#>",
+  fig.width = 7, fig.height = 4
+)
+```
+
+`smotifrs` is the Rust-accelerated companion to [smotif]. It exposes the
+same enumeration API for size-2 / size-3 / size-4 motifs but runs the
+inner loops on a compact CSR adjacency in Rust, and can read
+`nodes.parquet` / `edges.parquet` directly without materializing a
+`SpatialGraph` in R memory. This vignette shows how to install both
+packages, swap backends with a single argument, read parquet directly
+in Rust, and benchmark the speed/memory tradeoff at three dataset
+sizes. A short list of natural next steps closes the tutorial.
+
+## 1. Installation
+
+Both packages are needed: `smotif` for the data model and downstream
+analyses, `smotifrs` for the Rust kernels.
+
+```r
+# 1. Install smotif (R-only, fast)
+remotes::install_github("rdries/smotif")
+
+# 2. Install smotifrs — RECOMMENDED: pre-built binary (no Rust toolchain)
+install.packages(
+  "smotifrs",
+  repos = c("https://rdries.r-universe.dev", getOption("repos"))
+)
+
+# 2a. Source install (only if you have cargo + rustc on your PATH)
+# remotes::install_github("rdries/smotifrs")
+```
+
+The R-universe path downloads a pre-compiled `.so` / `.dylib` / `.dll`
+matching your platform, so users who don't want to deal with Rust never
+have to. Source builds remain available for power users who do.
+
+```{r load, message = FALSE}
+library(smotif)
+library(smotifrs)
+library(ggplot2)
+```
+
+## 2. Quickstart: a one-line backend swap
+
+Anywhere you'd call `smotif::find_motifs(sg, ...)`, pass
+`backend = "rust"`. The output is a `Motifs` object identical in
+schema to the R backend — every downstream consumer (null models,
+gene association, niche comparison) works unchanged.
+
+```{r quickstart}
+ext <- system.file("extdata", "workshop_xenium", package = "smotif")
+sg <- read_spatial_graph(file.path(ext, "nodes.parquet"),
+                         file.path(ext, "edges.parquet"))
+sg
+
+m_ig <- find_motifs(sg, size = 3L, backend = "igraph")
+m_rs <- find_motifs(sg, size = 3L, backend = "rust")
+
+# Bit-for-bit parity on the catalog.
+identical(
+  m_ig$catalog[order(motif_id), .(motif_id, count)],
+  m_rs$catalog[order(motif_id), .(motif_id, count)]
+)
+```
+
+**What's happening under the hood.** `smotif`'s pure-R backend builds an
+igraph object and runs `data.table` joins to enumerate triangles and
+wedges. `smotifrs` instead constructs a compact compressed-sparse-row
+adjacency in Rust (sorted neighbor lists per vertex), then runs:
+
+* **size 2** — vectorized over edges with packed integer color keys.
+* **size 3 closed** — sorted-merge triangle intersection: for every
+  edge `u-v` with `u < v`, walk `N(u) ∩ N(v)` keeping only `w > v`.
+* **size 3 open** — for each center, every unordered pair of
+  neighbors that is *not itself* an edge (one O(1) hash lookup against
+  an `ahash` packed-edge set).
+* **size 4** — extend every connected 3-subgraph by a fourth vertex,
+  dedupe with `u128`-packed keys, classify by `(n_edges, sorted
+  degrees)` into one of `{path, claw, cycle, paw, diamond, K4}`.
+
+Canonical motif labels (sort vertices by `(degree-in-motif, color)`)
+match the R kernel byte-for-byte, which is why the parity check passes.
+
+## 3. Direct parquet I/O — for million-cell datasets
+
+For graphs that don't fit comfortably in R memory, skip the
+`SpatialGraph` round-trip. `find_motifs_from_parquet()` reads
+nodes.parquet and edges.parquet directly via `arrow-rs`, builds the
+CSR in Rust, and returns the motif catalog without ever allocating
+the bulk node/edge data on R's heap.
+
+```{r parquet-direct}
+m_direct <- find_motifs_from_parquet(
+  file.path(ext, "nodes.parquet"),
+  file.path(ext, "edges.parquet"),
+  size = 3L
+)
+identical(
+  m_direct$catalog[order(motif_id), count],
+  m_rs$catalog[order(motif_id), count]
+)
+```
+
+The motif catalog and incidence tables are small (one row per motif
+type and one per vertex-instance respectively) so they round-trip back
+to R cheaply. The expensive 1M+ row edges table stays in Rust.
+
+## 4. Benchmark: three synthetic kNN graphs
+
+We generate three random spatial graphs at increasing sizes and time
+both backends at sizes 3 and 4. The R-side memory peak is read from
+`gc()`'s `"max used"` column and tells a clean story: the Rust backend
+keeps the graph out of R's heap, so it costs near-zero R memory.
+
+```{r helpers}
+make_synthetic <- function(n, k = 6L, seed = 1L) {
+  set.seed(seed)
+  coords <- cbind(x = stats::runif(n, 0, 1000),
+                  y = stats::runif(n, 0, 1000))
+  types <- sample(c("T", "B", "M", "E", "X"), n, replace = TRUE)
+  build_spatial_graph(
+    coords, types, "synth",
+    cell_id = paste0("c", seq_len(n)),
+    method = "knn", k = k
+  )
+}
+
+peak_mb_from_gc <- function(g) {
+  # Robust across R versions: locate the "max used" column and read
+  # the Mb counterpart immediately after it.
+  i <- which(colnames(g) == "max used")
+  if (!length(i) || ncol(g) < i + 1L) return(NA_real_)
+  sum(g[, i + 1L])
+}
+
+bench_one <- function(label, fn) {
+  invisible(gc(reset = TRUE, full = TRUE))
+  t1 <- Sys.time()
+  # Keep the result alive until t2 so its allocation is captured by gc().
+  result_holder <- fn()
+  t2 <- Sys.time()
+  g <- gc(verbose = FALSE)
+  rm(result_holder)
+  data.frame(
+    label     = label,
+    elapsed   = as.numeric(difftime(t2, t1, units = "s")),
+    r_peak_mb = peak_mb_from_gc(g)
+  )
+}
+```
+
+```{r benchmarks, results = "hide"}
+sizes <- c(small = 2500L, medium = 10000L, large = 30000L)
+out <- list()
+for (sz_name in names(sizes)) {
+  n <- sizes[[sz_name]]
+  message("building synthetic graph: ", n, " cells")
+  sg_n <- make_synthetic(n)
+  for (motif_size in c(3L, 4L)) {
+    out[[length(out) + 1L]] <- transform(
+      bench_one(
+        sprintf("%s/N=%d/size=%d/igraph", sz_name, n, motif_size),
+        function() find_motifs(sg_n, size = motif_size, backend = "igraph")
+      ),
+      backend = "igraph", N = n, motif_size = motif_size, sz_name = sz_name
+    )
+    out[[length(out) + 1L]] <- transform(
+      bench_one(
+        sprintf("%s/N=%d/size=%d/rust", sz_name, n, motif_size),
+        function() find_motifs(sg_n, size = motif_size, backend = "rust")
+      ),
+      backend = "rust", N = n, motif_size = motif_size, sz_name = sz_name
+    )
+  }
+}
+bench <- do.call(rbind, out)
+bench$sz_name <- factor(bench$sz_name, levels = names(sizes))
+```
+
+```{r bench-table}
+data.table::setDT(bench)
+bench[, .(label, elapsed_s = round(elapsed, 2),
+          r_peak_mb = round(r_peak_mb, 1))]
+```
+
+### 4a. Speedup vs dataset size
+
+For each motif size, the Rust backend's win grows with N because the R
+backend allocates increasingly large intermediate `data.table`s during
+joins, while the Rust CSR + ahash lookups stay constant-factor.
+
+```{r time-plot, fig.width = 7, fig.height = 4.2}
+ggplot(bench,
+       aes(x = N, y = elapsed, color = backend, linetype = backend,
+           shape = backend)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2.4) +
+  facet_wrap(~ paste("size", motif_size), scales = "free_y") +
+  scale_x_log10() +
+  scale_y_log10() +
+  scale_color_manual(values = c(igraph = "#888888", rust = "#d73027")) +
+  labs(x = "number of cells", y = "elapsed time (s, log scale)",
+       title = "Wall-clock: pure-R igraph vs Rust backend") +
+  theme_minimal(base_size = 10)
+```
+
+```{r speedup-table}
+sp <- data.table::dcast(bench,
+                        sz_name + N + motif_size ~ backend,
+                        value.var = "elapsed")
+sp[, speedup := round(igraph / rust, 2)]
+sp[, .(sz_name, N, motif_size,
+       igraph_s = round(igraph, 2),
+       rust_s   = round(rust, 2),
+       speedup)]
+```
+
+### 4b. R-side memory peak
+
+Pure R routes pass through `data.table` joins that materialize every
+candidate motif as a row before deduplication; the Rust backend keeps
+the graph in its own heap and only ships the final catalog/incidence
+back to R. The result is a roughly N-proportional gap in R-side
+working set.
+
+```{r mem-plot, fig.width = 7, fig.height = 4.2}
+ggplot(bench,
+       aes(x = sz_name, y = r_peak_mb, fill = backend)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  facet_wrap(~ paste("size", motif_size)) +
+  scale_fill_manual(values = c(igraph = "#888888", rust = "#d73027")) +
+  labs(x = "dataset size", y = "R-heap peak (MiB)",
+       title = "R-side memory peak (gc max-used)",
+       subtitle = "Rust kernel keeps the graph out of R memory") +
+  theme_minimal(base_size = 10)
+```
+
+The reported number is the maximum R heap used during the call (read
+from `gc()`'s `"max used"` column). It excludes whatever Rust's own
+allocator reserves for its CSR — that's a separate working set, far
+smaller than the equivalent `data.table` representation in R, but not
+visible to R's `gc()`.
+
+## 5. Where this matters in practice
+
+* **Hot inner loop in repeated analyses.** Permutation-based
+  enrichment (`smotif::test_motif_enrichment`) doesn't currently
+  re-enumerate motifs (it just relabels), but if you script your own
+  motif-recount-per-permutation, swapping the backend cuts wall time.
+* **Parquet pipelines from upstream tools.** If you're already writing
+  `nodes.parquet` and `edges.parquet` from a Python or Giotto pipeline,
+  `find_motifs_from_parquet()` lets you skip the R-side ingest
+  entirely. Useful when those files exist on object storage and you'd
+  rather not pull them through R's Arrow bindings.
+* **CI / batch jobs at scale.** The 30k benchmark runs in seconds with
+  the Rust backend on a single core; parallelism (next section) makes
+  ≥1M-cell jobs feasible inside R.
+
+## 6. Future improvements
+
+A few natural next steps, in rough order of payoff for the size of
+slides we expect to see:
+
+1. **Parallel enumeration** — the current Rust backend is
+   single-threaded. The size-3-closed and size-3-open kernels are
+   embarrassingly parallel over the outer vertex loop; wiring up
+   `rayon::into_par_iter` is a one-liner per kernel and should
+   give 4–8× on a typical laptop CPU.
+2. **Streaming size-4 incidence to disk.** Catalogs stay small even
+   at 1M cells, but the per-instance incidence table can balloon into
+   the hundreds of millions of rows. An `incidence_path = ...`
+   argument that streams parquet output (one batch per topology
+   class) keeps R's memory flat and makes downstream queries a
+   `arrow::open_dataset()` call.
+3. **Size 5+ motifs via ESU + color-coding.** The exhaustive
+   3-subgraph extension we use for size 4 doesn't generalize cleanly;
+   Wernicke's ESU enumerator with color-coding samples a controlled
+   fraction of the search space and is the standard approach for k≥5.
+4. **Per-sample meta-analysis in Rust.** `associate_genes(pooling = "per_sample")`
+   loops over samples in R today; pushing the Wilcoxon rank-sum down
+   to Rust (with sample-stratified rank arrays) avoids the
+   per-call extendr overhead.
+5. **Exact canonical labeling for size 4.** Today's `(degree, color)`
+   sort is approximate (collides on certain colored cycles). Bliss or
+   a hand-coded Schreier-Sims tailored to size 4 would close the gap
+   without the cost of a full nauty-style canonicalization.
+6. **GPU enumeration.** For very large slides, a CUDA / wgpu kernel
+   for triangle counting + per-pair color aggregation would push
+   throughput by another order of magnitude — useful once whole-organ
+   atlases (millions of cells per slide, dozens of slides) become
+   routine.
+
+The first two are the most concrete wins; everything below is
+research-tier work whose payoff depends on what biology people
+actually want to ask of these datasets.

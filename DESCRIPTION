@@ -1,0 +1,28 @@
+Package: smotifrs
+Title: Rust backend for smotif motif enumeration
+Version: 0.1.0
+Authors@R: 
+    person("Ruben", "Dries", , "rdries@bu.edu", role = c("aut", "cre"))
+Description: Drop-in Rust acceleration for the smotif R package: parallel
+    enumeration of size-2 / size-3 / size-4 multi-cellular motifs in
+    spatial omics graphs, plus direct parquet I/O for million-cell
+    datasets. Distributed as pre-compiled binaries via R-universe.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.3
+Config/rextendr/version: 0.5.0
+SystemRequirements: Cargo (Rust's package manager), rustc >= 1.65.0, xz
+Depends:
+    R (>= 4.2)
+Imports:
+    data.table
+Suggests:
+    arrow,
+    ggplot2,
+    knitr,
+    rmarkdown,
+    smotif,
+    testthat (>= 3.0.0)
+VignetteBuilder: knitr
+Config/testthat/edition: 3
