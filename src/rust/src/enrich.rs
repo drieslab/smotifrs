@@ -635,3 +635,68 @@ mod scale {
         }
     }
 }
+
+/// Instances of selected motif classes, for plotting or downstream inspection.
+///
+/// Deliberately narrow: the enrichment kernel never returns per-instance data,
+/// because at size 4 on a real dataset that is tens of millions of rows. This
+/// returns instances for *named classes only*, so the output is bounded by
+/// those classes' observed counts rather than by the whole enumeration.
+///
+/// Returns the vertices flattened row-major (`k` per instance) alongside the
+/// index into `wanted` that each instance matched.
+pub fn collect_instances(
+    g: &SpatialGraphRs,
+    k: usize,
+    wanted: &[String],
+    max_per_class: usize,
+) -> Result<(Vec<u32>, Vec<u32>), String> {
+    let topos = topologies(k);
+    let want: AHashMap<&str, u32> = wanted
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.as_str(), i as u32))
+        .collect();
+    let inst = build_instances(g, k, &topos, None);
+
+    let mut verts: Vec<u32> = Vec::new();
+    let mut which: Vec<u32> = Vec::new();
+    let mut seen: AHashMap<u32, usize> = AHashMap::new();
+    let mut buf = String::with_capacity(48);
+
+    for i in 0..inst.topo.len() {
+        let t = inst.topo[i] as usize;
+        let base = i * k;
+        let mut slot_colors = [0u32; 4];
+        for s in 0..k {
+            slot_colors[s] = g.colors[inst.verts[base + s] as usize];
+        }
+        let key = canonical_color_key(&slot_colors, &topos[t].auts, k);
+        buf.clear();
+        buf.push_str("size");
+        buf.push_str(&k.to_string());
+        buf.push('_');
+        buf.push_str(topos[t].name);
+        buf.push('_');
+        for s in 0..k {
+            if s > 0 {
+                buf.push('-');
+            }
+            let c = ((key >> (48 - 16 * s)) & 0xFFFF) as usize;
+            buf.push_str(&g.color_levels[c]);
+        }
+        if let Some(&w) = want.get(buf.as_str()) {
+            let n = seen.entry(w).or_insert(0);
+            if *n >= max_per_class {
+                continue;
+            }
+            *n += 1;
+            // emit vertices in canonical slot order, 1-based for R
+            for s in 0..k {
+                verts.push(inst.verts[base + s] + 1);
+            }
+            which.push(w);
+        }
+    }
+    Ok((verts, which))
+}

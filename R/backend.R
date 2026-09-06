@@ -394,3 +394,76 @@ motif_enrichment_rs <- function(from,
   }
   out[]
 }
+
+
+#' Instances of selected motif classes
+#'
+#' Returns the cells making up each occurrence of the named motif classes.
+#'
+#' Deliberately narrow. [motif_enrichment_rs()] never returns per-instance data
+#' because at size 4 on a real dataset that is tens of millions of rows; this
+#' returns instances for *named classes only*, so the output is bounded by those
+#' classes' observed counts. Pick the motifs worth looking at first, then ask
+#' for their instances.
+#'
+#' @inheritParams motif_enrichment_rs
+#' @param motif_ids character vector of `motif_id` values from
+#'   [motif_enrichment_rs()].
+#' @param max_per_class cap on instances returned per class. `Inf` for no cap.
+#' @returns a `data.table` with `motif_id`, `instance`, `slot` (the structural
+#'   position within the motif, 1-based) and `node` (the 1-based node index),
+#'   in long form -- `k` rows per instance.
+#' @examples
+#' from <- c(1L, 2L, 3L, 4L, 5L, 6L)
+#' to <- c(2L, 3L, 4L, 5L, 6L, 1L)
+#' ct <- rep(c("A", "B"), 3)
+#' e <- motif_enrichment_rs(from, to, ct, size = 3L, n_perm = 19L)
+#' motif_instances_rs(from, to, ct, size = 3L, motif_ids = e$motif_id[1])
+#' @export
+motif_instances_rs <- function(from,
+                               to,
+                               cell_type,
+                               motif_ids,
+                               n_nodes = NULL,
+                               size = 3L,
+                               max_per_class = 5000) {
+  size <- as.integer(size)
+  if (length(size) != 1L || is.na(size) || !size %in% 2:4) {
+    stop("size must be 2, 3 or 4", call. = FALSE)
+  }
+  motif_ids <- unique(as.character(motif_ids))
+  if (!length(motif_ids)) {
+    stop("motif_ids must name at least one motif class", call. = FALSE)
+  }
+  ct <- if (is.factor(cell_type)) cell_type else factor(cell_type)
+  n <- if (is.null(n_nodes)) length(ct) else as.integer(n_nodes)
+  if (length(ct) != n) {
+    stop("cell_type must have one entry per node", call. = FALSE)
+  }
+  cap <- if (is.finite(max_per_class)) as.integer(max_per_class) else 0L
+
+  rs <- rs_motif_instances(
+    n_nodes = n,
+    type_codes = as.integer(ct),
+    type_levels = levels(ct),
+    edge_source = as.integer(from),
+    edge_target = as.integer(to),
+    size = size,
+    motif_ids = motif_ids,
+    max_per_class = cap
+  )
+  k <- rs$k
+  n_inst <- length(rs$which)
+  if (n_inst == 0L) {
+    return(data.table::data.table(
+      motif_id = character(), instance = integer(),
+      slot = integer(), node = integer()
+    ))
+  }
+  data.table::data.table(
+    motif_id = rep(motif_ids[rs$which], each = k),
+    instance = rep(seq_len(n_inst), each = k),
+    slot = rep(seq_len(k), times = n_inst),
+    node = as.integer(rs$verts)
+  )
+}

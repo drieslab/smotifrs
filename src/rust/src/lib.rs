@@ -319,6 +319,44 @@ fn rs_motif_enrichment(
     ))
 }
 
+/// Internal FFI: vertices of instances belonging to named motif classes.
+///
+/// @keywords internal
+#[extendr]
+#[allow(clippy::too_many_arguments)]
+fn rs_motif_instances(
+    n_nodes: i32,
+    type_codes: Integers,
+    type_levels: Vec<String>,
+    edge_source: Integers,
+    edge_target: Integers,
+    size: i32,
+    motif_ids: Vec<String>,
+    max_per_class: i32,
+) -> Result<List> {
+    let n = n_nodes as usize;
+    if !(2..=4).contains(&size) {
+        return Err(Error::Other(format!("size must be 2, 3 or 4; got {}", size)));
+    }
+    let colors: Vec<u32> = type_codes.iter().map(|i| (i.0 - 1) as u32).collect();
+    let src = integers_to_u32(&edge_source);
+    let tgt = integers_to_u32(&edge_target);
+    let g = SpatialGraphRs::build_coded(n, colors, type_levels, &src, &tgt)
+        .map_err(Error::Other)?;
+    let (verts, which) = crate::enrich::collect_instances(
+        &g,
+        size as usize,
+        &motif_ids,
+        if max_per_class <= 0 { usize::MAX } else { max_per_class as usize },
+    )
+    .map_err(Error::Other)?;
+    Ok(list!(
+        verts = verts,
+        which = which.iter().map(|w| *w as i32 + 1).collect::<Vec<i32>>(),
+        k = size
+    ))
+}
+
 /// Internal smoke-test entry point used during package build.
 ///
 /// @keywords internal
@@ -333,4 +371,5 @@ extendr_module! {
     fn rs_find_motifs;
     fn rs_find_motifs_from_parquet;
     fn rs_motif_enrichment;
+    fn rs_motif_instances;
 }

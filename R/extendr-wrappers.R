@@ -32,4 +32,9 @@ rs_find_motifs_from_parquet <- function(nodes_path, edges_path, size, colored, a
 #' @keywords internal
 rs_motif_enrichment <- function(n_nodes, type_codes, type_levels, edge_source, edge_target, size, n_perm, seed, strata, anchored_on, null_kind, cond_temp) .Call(wrap__rs_motif_enrichment, n_nodes, type_codes, type_levels, edge_source, edge_target, size, n_perm, seed, strata, anchored_on, null_kind, cond_temp)
 
+#' Internal FFI: vertices of instances belonging to named motif classes.
+#'
+#' @keywords internal
+rs_motif_instances <- function(n_nodes, type_codes, type_levels, edge_source, edge_target, size, motif_ids, max_per_class) .Call(wrap__rs_motif_instances, n_nodes, type_codes, type_levels, edge_source, edge_target, size, motif_ids, max_per_class)
+
 # nolint end
