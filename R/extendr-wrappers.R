@@ -37,4 +37,15 @@ rs_motif_enrichment <- function(n_nodes, type_codes, type_levels, edge_source, e
 #' @keywords internal
 rs_motif_instances <- function(n_nodes, type_codes, type_levels, edge_source, edge_target, size, motif_ids, max_per_class) .Call(wrap__rs_motif_instances, n_nodes, type_codes, type_levels, edge_source, edge_target, size, motif_ids, max_per_class)
 
+#' Internal FFI: motif enrichment read straight from a GiottoDisk
+#' `parquetEdgeStore`, without materializing the graph in R.
+#'
+#' @keywords internal
+rs_motif_enrichment_edge_store <- function(nodes_path, edges_path, type_codes, type_levels, size, n_perm, seed, null_kind, cond_temp) .Call(wrap__rs_motif_enrichment_edge_store, nodes_path, edges_path, type_codes, type_levels, size, n_perm, seed, null_kind, cond_temp)
+
+#' Internal FFI: node ids and int codes from a `parquetEdgeStore` sidecar.
+#'
+#' @keywords internal
+rs_edge_store_nodes <- function(nodes_path) .Call(wrap__rs_edge_store_nodes, nodes_path)
+
 # nolint end

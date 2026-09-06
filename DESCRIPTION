@@ -18,11 +18,14 @@ Imports:
     data.table
 Suggests:
     arrow,
+    GiottoDisk,
+    igraph,
     ggplot2,
     knitr,
     rmarkdown,
     smotif,
-    testthat (>= 3.0.0)
+    testthat (>= 3.0.0),
+    withr
 VignetteBuilder: knitr
 Config/testthat/edition: 3
 Config/roxygen2/version: 8.0.0

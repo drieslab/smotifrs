@@ -325,6 +325,13 @@ motif_enrichment_rs <- function(from,
     cond_temp = as.numeric(cond_temp)
   )
 
+  .rs_enrichment_to_dt(rs, null, cond_temp)
+}
+
+
+#' @keywords internal
+#' @noRd
+.rs_enrichment_to_dt <- function(rs, null, cond_temp) {
   nclass <- length(rs$motif_id)
   cols <- matrix(rs$color_flat, nrow = nclass, ncol = rs$k, byrow = TRUE)
   eps <- .Machine$double.eps
@@ -357,21 +364,10 @@ motif_enrichment_rs <- function(from,
   attr(out, "n_perm") <- rs$n_perm
   attr(out, "null") <- null
   if (identical(null, "conditional")) {
-    # how tightly the constraint held, as a fraction of all edges
     attr(out, "cond_dev") <- if (rs$n_edges > 0) rs$cond_dev / rs$n_edges else NA_real_
     attr(out, "cond_accept") <- rs$cond_accept
     attr(out, "cond_moved") <- rs$cond_moved
-    # A chain held too cold barely moves, and then every draw is the observed
-    # data. That reads as "nothing is significant" rather than as a failure, so
-    # it has to be said out loud rather than left in an attribute.
     attr(out, "cond_moves_per_draw") <- rs$cond_moves_per_draw
-    # Draws are only decorrelated once the chain makes on the order of one
-    # accepted swap per node between samples. Below that, consecutive draws are
-    # near-copies of each other and of the observed data -- which surfaces as
-    # "nothing is significant" rather than as a failure, so say it out loud.
-    # Two independent signals, and both must fire. Displacement alone is not
-    # enough: when the pairwise table genuinely pins most labels, low
-    # displacement is the correct answer rather than a mixing failure.
     if (is.finite(rs$cond_moves_per_draw) &&
         rs$cond_moves_per_draw < rs$n_nodes_out / 4 &&
         is.finite(rs$cond_moved) && rs$cond_moved < 0.25) {
@@ -466,4 +462,78 @@ motif_instances_rs <- function(from,
     slot = rep(seq_len(k), times = n_inst),
     node = as.integer(rs$verts)
   )
+}
+
+
+#' Motif enrichment straight from a GiottoDisk edge store
+#'
+#' Reads a `parquetEdgeStore` in Rust and runs the enrichment without
+#' materializing the graph in R.
+#'
+#' GiottoDisk interns node ids at write time, so the edge parquet already holds
+#' integer endpoints. Reading those columns straight through skips the
+#' string-to-index hashing that [find_motifs_from_parquet()] has to do for
+#' smotif's own on-disk format -- there is no hash map and no string per cell.
+#'
+#' Cell type labels are not in the edge store by design (the node sidecar
+#' carries ids only), so they are supplied here, aligned to the sidecar's
+#' `int_id` order. [edge_store_nodes()] returns that order.
+#'
+#' @param nodes_path,edges_path paths to the store's `nodes/` and `edges/`
+#'   parquet files.
+#' @param cell_type factor or character vector of labels, one per node, in
+#'   sidecar `int_id` order.
+#' @param size motif size: 2, 3 or 4.
+#' @param n_perm,seed permutation count and seed.
+#' @param null `"label"` or `"conditional"`.
+#' @param cond_temp Metropolis temperature for the conditional null.
+#' @returns a `data.table` in the same shape as [motif_enrichment_rs()].
+#' @seealso [edge_store_nodes()]
+#' @export
+motif_enrichment_edge_store <- function(nodes_path,
+                                        edges_path,
+                                        cell_type,
+                                        size = 3L,
+                                        n_perm = 1000L,
+                                        seed = 1L,
+                                        null = c("label", "conditional"),
+                                        cond_temp = 1) {
+  null <- match.arg(null)
+  size <- as.integer(size)
+  if (!size %in% 2:4) stop("size must be 2, 3 or 4", call. = FALSE)
+  for (p in c(nodes_path, edges_path)) {
+    if (!file.exists(p)) {
+      stop(sprintf("no such file: %s", p), call. = FALSE)
+    }
+  }
+  ct <- if (is.factor(cell_type)) cell_type else factor(cell_type)
+  rs <- rs_motif_enrichment_edge_store(
+    nodes_path = path.expand(nodes_path),
+    edges_path = path.expand(edges_path),
+    type_codes = as.integer(ct),
+    type_levels = levels(ct),
+    size = size,
+    n_perm = as.integer(n_perm),
+    seed = as.integer(seed),
+    null_kind = null,
+    cond_temp = as.numeric(cond_temp)
+  )
+  .rs_enrichment_to_dt(rs, null, cond_temp)
+}
+
+
+#' Node ids and integer codes from a GiottoDisk edge store sidecar
+#'
+#' The order returned here is the order `cell_type` must be supplied in to
+#' [motif_enrichment_edge_store()].
+#'
+#' @param nodes_path path to the store's `nodes/` parquet.
+#' @returns a `data.table` with `node_id` and `int_id`.
+#' @export
+edge_store_nodes <- function(nodes_path) {
+  if (!file.exists(nodes_path)) {
+    stop(sprintf("no such file: %s", nodes_path), call. = FALSE)
+  }
+  r <- rs_edge_store_nodes(path.expand(nodes_path))
+  data.table::data.table(node_id = r$node_id, int_id = r$int_id)
 }
