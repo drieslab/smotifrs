@@ -2,6 +2,8 @@ use extendr_api::prelude::*;
 use extendr_api::Result;
 
 mod canonical;
+mod enrich;
+mod esu;
 mod motifclass;
 mod graph;
 mod motifs;
