@@ -2,6 +2,7 @@ use extendr_api::prelude::*;
 use extendr_api::Result;
 
 mod canonical;
+mod motifclass;
 mod graph;
 mod motifs;
 mod parquet_io;
