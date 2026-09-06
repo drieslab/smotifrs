@@ -2,6 +2,7 @@
 
 export(find_motifs_from_parquet)
 export(find_motifs_rs)
+export(motif_enrichment_rs)
 importFrom(data.table,":=")
 importFrom(data.table,.N)
 importFrom(data.table,.SD)

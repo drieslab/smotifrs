@@ -131,6 +131,113 @@ impl SpatialGraphRs {
         })
     }
 
+
+    /// Build from pre-encoded integer color codes and an explicit level table.
+    ///
+    /// The string-based [`SpatialGraphRs::build`] interns levels with Rust's
+    /// byte ordering, which disagrees with R's locale collation for cell type
+    /// names containing case differences, spaces or `+` -- the two backends
+    /// could then emit different color tuples for the same data. Taking codes
+    /// and levels from the caller removes that divergence, and avoids
+    /// allocating one `String` per cell.
+    pub fn build_coded(
+        n_nodes: usize,
+        colors: Vec<u32>,
+        color_levels: Vec<String>,
+        source_idx: &[u32],
+        target_idx: &[u32],
+    ) -> Result<Self, String> {
+        if colors.len() != n_nodes {
+            return Err(format!(
+                "colors length {} != n_nodes {}",
+                colors.len(),
+                n_nodes
+            ));
+        }
+        if let Some(&m) = colors.iter().max() {
+            if (m as usize) >= color_levels.len() {
+                return Err(format!(
+                    "color code {} out of range for {} levels",
+                    m,
+                    color_levels.len()
+                ));
+            }
+        }
+        if source_idx.len() != target_idx.len() {
+            return Err("source/target length mismatch".to_string());
+        }
+        let dummy: Vec<String> = Vec::new();
+        let mut g = Self::build_topology(n_nodes, source_idx, target_idx)?;
+        g.cell_ids = dummy;
+        g.colors = colors;
+        g.color_levels = color_levels;
+        Ok(g)
+    }
+
+    /// Topology-only construction shared by the string and coded builders.
+    fn build_topology(
+        n: usize,
+        source_idx: &[u32],
+        target_idx: &[u32],
+    ) -> Result<Self, String> {
+        let m = source_idx.len();
+        let mut edge_keys: AHashSet<u64> = AHashSet::with_capacity(m * 2);
+        let mut canon: Vec<(u32, u32)> = Vec::with_capacity(m);
+        for k in 0..m {
+            let (s, t) = (source_idx[k], target_idx[k]);
+            if s == t {
+                continue;
+            }
+            let (lo, hi) = if s < t { (s, t) } else { (t, s) };
+            if (lo as usize) >= n || (hi as usize) >= n {
+                return Err(format!(
+                    "edge endpoint out of range: ({}, {}); n_nodes = {}",
+                    lo, hi, n
+                ));
+            }
+            let key = pack_edge(lo, hi);
+            if edge_keys.insert(key) {
+                canon.push((lo, hi));
+            }
+        }
+        let mut degrees: Vec<u32> = vec![0; n];
+        for &(lo, hi) in &canon {
+            degrees[lo as usize] += 1;
+            degrees[hi as usize] += 1;
+        }
+        let mut neigh_offsets: Vec<u32> = Vec::with_capacity(n + 1);
+        neigh_offsets.push(0);
+        for d in &degrees {
+            let last = *neigh_offsets.last().unwrap();
+            neigh_offsets.push(last + d);
+        }
+        let total = *neigh_offsets.last().unwrap() as usize;
+        let mut neighbors: Vec<u32> = vec![u32::MAX; total];
+        let mut cursors: Vec<u32> = neigh_offsets[..n].to_vec();
+        for &(lo, hi) in &canon {
+            let cu = cursors[lo as usize] as usize;
+            neighbors[cu] = hi;
+            cursors[lo as usize] += 1;
+            let cv = cursors[hi as usize] as usize;
+            neighbors[cv] = lo;
+            cursors[hi as usize] += 1;
+        }
+        for v in 0..n {
+            let lo = neigh_offsets[v] as usize;
+            let hi = neigh_offsets[v + 1] as usize;
+            neighbors[lo..hi].sort_unstable();
+        }
+        Ok(SpatialGraphRs {
+            n_nodes: n,
+            cell_ids: Vec::new(),
+            neigh_offsets,
+            neighbors,
+            colors: Vec::new(),
+            color_levels: Vec::new(),
+            edge_keys,
+        })
+    }
+
     #[inline]
     pub fn neighbors_of(&self, v: u32) -> &[u32] {
         let lo = self.neigh_offsets[v as usize] as usize;

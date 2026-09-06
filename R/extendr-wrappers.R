@@ -22,4 +22,14 @@ rs_find_motifs <- function(cell_ids, cell_types, edge_source, edge_target, size,
 #' @keywords internal
 rs_find_motifs_from_parquet <- function(nodes_path, edges_path, size, colored, anchored_on_idx) .Call(wrap__rs_find_motifs_from_parquet, nodes_path, edges_path, size, colored, anchored_on_idx)
 
+#' Internal FFI: enumerate motifs and test enrichment in one call, returning
+#' only per-class statistics. Per-instance data never crosses into R.
+#'
+#' Cell types arrive as 1-based integer codes plus a level table so that R owns
+#' the level ordering; this avoids allocating one string per cell and keeps the
+#' two backends from disagreeing under different locale collations.
+#'
+#' @keywords internal
+rs_motif_enrichment <- function(n_nodes, type_codes, type_levels, edge_source, edge_target, size, n_perm, seed, strata, anchored_on) .Call(wrap__rs_motif_enrichment, n_nodes, type_codes, type_levels, edge_source, edge_target, size, n_perm, seed, strata, anchored_on)
+
 # nolint end
