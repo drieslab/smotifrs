@@ -2,6 +2,7 @@ use extendr_api::prelude::*;
 use extendr_api::Result;
 
 mod canonical;
+mod conditional;
 mod enrich;
 mod esu;
 mod motifclass;
@@ -201,6 +202,8 @@ fn rs_motif_enrichment(
     seed: i32,
     strata: Robj,
     anchored_on: Robj,
+    null_kind: &str,
+    cond_temp: f64,
 ) -> Result<List> {
     let n = n_nodes as usize;
     if type_codes.len() != n {
@@ -244,6 +247,23 @@ fn rs_motif_enrichment(
         Some(integers_to_u32(&ints))
     };
 
+    let nk = match null_kind {
+        "label" => crate::enrich::NullKind::Label,
+        "stratified" => crate::enrich::NullKind::Stratified,
+        "conditional" => crate::enrich::NullKind::Conditional,
+        other => {
+            return Err(Error::Other(format!(
+                "unknown null '{}'; expected label, stratified or conditional",
+                other
+            )))
+        }
+    };
+    if nk == crate::enrich::NullKind::Stratified && strata_vec.is_none() {
+        return Err(Error::Other(
+            "the stratified null needs a strata vector".into(),
+        ));
+    }
+
     let r = crate::enrich::run_enrichment(
         &g,
         size as usize,
@@ -251,6 +271,8 @@ fn rs_motif_enrichment(
         seed as u64,
         strata_vec.as_deref(),
         anchors.as_deref(),
+        nk,
+        cond_temp,
     )
     .map_err(Error::Other)?;
 
@@ -287,7 +309,13 @@ fn rs_motif_enrichment(
         p_deplete = r.p_deplete.clone(),
         n_instances = r.n_instances as f64,
         n_perm = n_perm,
-        k = size
+        k = size,
+        cond_dev = r.cond_dev,
+        n_edges = r.n_edges as f64,
+        cond_accept = r.cond_accept,
+        cond_moved = r.cond_moved,
+        cond_moves_per_draw = r.cond_moves_per_draw,
+        n_nodes_out = n_nodes
     ))
 }
 

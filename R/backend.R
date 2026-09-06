@@ -198,9 +198,35 @@ find_motifs_from_parquet <- function(nodes_path,
 #' @param n_perm number of label permutations.
 #' @param seed integer seed. Results depend only on `(seed, draw index)`, never
 #'   on thread scheduling.
-#' @param strata optional factor or integer vector, one per node. When given,
-#'   labels are only exchanged between nodes sharing a stratum, which preserves
-#'   each stratum's cell type composition exactly.
+#' @param null which null to test against.
+#'   * `"label"` shuffles labels over all nodes. Answers "is this motif more
+#'     common than the tissue's cell type composition implies".
+#'   * `"stratified"` shuffles only within `strata`, preserving each stratum's
+#'     composition exactly.
+#'   * `"conditional"` holds the observed **pairwise** edge-type composition
+#'     and randomizes everything else, so a size-3 or size-4 motif that is
+#'     still enriched is enriched *beyond* what its constituent pairs already
+#'     explain. Under `"label"` any motif built from an attracting pair looks
+#'     enriched, and the higher-order signal cannot be separated from an echo
+#'     of the pairwise one.
+#'
+#'   The conditional null conditions by tolerance, not exactly: a Metropolis
+#'   chain over label swaps holds the pairwise table close rather than pinning
+#'   it. Three attributes report what the chain actually did -- `cond_dev` (the
+#'   table deviation, as a fraction of all edges), `cond_accept` (acceptance
+#'   rate) and `cond_moved` (mean fraction of labels displaced from the observed
+#'   assignment). Report them rather than assuming the constraint held.
+#'
+#'   Watch `cond_moved` in particular. A chain held too cold barely moves, so
+#'   every draw is essentially the observed data and *everything* comes back
+#'   non-significant -- a failure that looks like a clean result. Below 5%
+#'   displacement this warns.
+#' @param cond_temp Metropolis temperature for `null = "conditional"`. Lower
+#'   holds the pairwise table tighter but mixes more slowly.
+#' @param strata optional factor or integer vector, one per node. Required for
+#'   `null = "stratified"`. When given, labels are only exchanged between nodes
+#'   sharing a stratum, which preserves each stratum's cell type composition
+#'   exactly.
 #' @param anchored_on optional integer vector of 1-based node indices.
 #'   Enumeration is restricted to subgraphs containing at least one of them.
 #' @returns a `data.table`, one row per motif class, with columns `motif_id`,
@@ -229,8 +255,11 @@ motif_enrichment_rs <- function(from,
                                 size = 3L,
                                 n_perm = 1000L,
                                 seed = 1L,
+                                null = c("label", "stratified", "conditional"),
+                                cond_temp = 1,
                                 strata = NULL,
                                 anchored_on = NULL) {
+  null <- match.arg(null)
   size <- as.integer(size)
   n_perm <- as.integer(n_perm)
   if (length(size) != 1L || is.na(size) || !size %in% 2:4) {
@@ -266,6 +295,12 @@ motif_enrichment_rs <- function(from,
     }
   }
 
+  if (identical(null, "stratified") && is.null(strata)) {
+    stop('null = "stratified" needs a strata vector', call. = FALSE)
+  }
+  if (!is.null(strata) && identical(null, "label")) {
+    null <- "stratified"
+  }
   strata_i <- NULL
   if (!is.null(strata)) {
     strata_i <- as.integer(if (is.factor(strata)) strata else factor(strata))
@@ -285,7 +320,9 @@ motif_enrichment_rs <- function(from,
     n_perm = n_perm,
     seed = as.integer(seed),
     strata = strata_i,
-    anchored_on = anchors_i
+    anchored_on = anchors_i,
+    null_kind = null,
+    cond_temp = as.numeric(cond_temp)
   )
 
   nclass <- length(rs$motif_id)
@@ -318,5 +355,42 @@ motif_enrichment_rs <- function(from,
   data.table::setorder(out, p_adj, -z)
   attr(out, "n_instances") <- rs$n_instances
   attr(out, "n_perm") <- rs$n_perm
+  attr(out, "null") <- null
+  if (identical(null, "conditional")) {
+    # how tightly the constraint held, as a fraction of all edges
+    attr(out, "cond_dev") <- if (rs$n_edges > 0) rs$cond_dev / rs$n_edges else NA_real_
+    attr(out, "cond_accept") <- rs$cond_accept
+    attr(out, "cond_moved") <- rs$cond_moved
+    # A chain held too cold barely moves, and then every draw is the observed
+    # data. That reads as "nothing is significant" rather than as a failure, so
+    # it has to be said out loud rather than left in an attribute.
+    attr(out, "cond_moves_per_draw") <- rs$cond_moves_per_draw
+    # Draws are only decorrelated once the chain makes on the order of one
+    # accepted swap per node between samples. Below that, consecutive draws are
+    # near-copies of each other and of the observed data -- which surfaces as
+    # "nothing is significant" rather than as a failure, so say it out loud.
+    # Two independent signals, and both must fire. Displacement alone is not
+    # enough: when the pairwise table genuinely pins most labels, low
+    # displacement is the correct answer rather than a mixing failure.
+    if (is.finite(rs$cond_moves_per_draw) &&
+        rs$cond_moves_per_draw < rs$n_nodes_out / 4 &&
+        is.finite(rs$cond_moved) && rs$cond_moved < 0.25) {
+      warning(sprintf(
+        paste0(
+          "the conditional null mixed poorly: %.0f accepted swaps between ",
+          "draws for %d nodes (acceptance %.1f%%, %.1f%% of labels displaced). ",
+          "Consecutive draws are near-copies, so p-values are unreliable and ",
+          "will tend to look uniformly non-significant. Raise cond_temp above ",
+          "%g, or raise n_perm."
+        ),
+        rs$cond_moves_per_draw, rs$n_nodes_out, 100 * rs$cond_accept,
+        100 * rs$cond_moved, cond_temp
+      ), call. = FALSE)
+    }
+  } else {
+    attr(out, "cond_dev") <- NA_real_
+    attr(out, "cond_accept") <- NA_real_
+    attr(out, "cond_moved") <- NA_real_
+  }
   out[]
 }

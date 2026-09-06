@@ -15,7 +15,9 @@ rs_motif_enrichment(
   n_perm,
   seed,
   strata,
-  anchored_on
+  anchored_on,
+  null_kind,
+  cond_temp
 )
 }
 \description{

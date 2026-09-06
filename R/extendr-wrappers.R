@@ -30,6 +30,6 @@ rs_find_motifs_from_parquet <- function(nodes_path, edges_path, size, colored, a
 #' two backends from disagreeing under different locale collations.
 #'
 #' @keywords internal
-rs_motif_enrichment <- function(n_nodes, type_codes, type_levels, edge_source, edge_target, size, n_perm, seed, strata, anchored_on) .Call(wrap__rs_motif_enrichment, n_nodes, type_codes, type_levels, edge_source, edge_target, size, n_perm, seed, strata, anchored_on)
+rs_motif_enrichment <- function(n_nodes, type_codes, type_levels, edge_source, edge_target, size, n_perm, seed, strata, anchored_on, null_kind, cond_temp) .Call(wrap__rs_motif_enrichment, n_nodes, type_codes, type_levels, edge_source, edge_target, size, n_perm, seed, strata, anchored_on, null_kind, cond_temp)
 
 # nolint end

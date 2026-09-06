@@ -23,6 +23,7 @@
 //! touched-list so the per-draw fold is proportional to realized classes rather
 //! than to the whole address space.
 
+use crate::conditional::{pair_table, SwapChain};
 use crate::esu::{esu_from_root, induced_mask};
 use crate::graph::SpatialGraphRs;
 use crate::motifclass::{
@@ -175,6 +176,26 @@ pub struct EnrichOut {
     pub p_enrich: Vec<f64>,
     pub p_deplete: Vec<f64>,
     pub n_instances: usize,
+    /// Mean absolute deviation of the pairwise type table from the observed
+    /// one across draws, in edges. Zero for the marginal nulls, which do not
+    /// constrain it; for the conditional null it is how tightly the constraint
+    /// actually held and should be reported, not assumed.
+    pub cond_dev: f64,
+    /// Total edges, so `cond_dev` can be read as a fraction.
+    pub n_edges: usize,
+    /// Conditional null only: fraction of proposals the chain accepted.
+    pub cond_accept: f64,
+    /// Conditional null only: mean fraction of nodes whose label differs from
+    /// the observed assignment at sampling time. A chain held too cold barely
+    /// moves, and then every "null" draw is the observed data -- which reads as
+    /// "nothing is significant" rather than as a failure. This is the number
+    /// that exposes it.
+    pub cond_moved: f64,
+    /// Conditional null only: accepted swaps between consecutive draws. Draws
+    /// are only decorrelated once this is comparable to the node count; a low
+    /// value means consecutive draws are near-copies of each other, and of the
+    /// observed data.
+    pub cond_moves_per_draw: f64,
 }
 
 /// Count every instance's canonical class under one color assignment, writing
@@ -212,8 +233,46 @@ fn tally(
     }
 }
 
-/// Full enrichment run: enumerate once, then fold `n_perm` label permutations
-/// into per-class statistics.
+/// Fold one draw's tallies into the running per-class accumulators, then reset
+/// the scratch counts. Shared by the marginal and conditional passes.
+#[inline]
+fn fold_draw(
+    counts: &mut [u32],
+    touched: &mut Vec<u32>,
+    obs_counts: &[u32],
+    acc: &mut AHashMap<u32, Acc>,
+) {
+    for &idx in touched.iter() {
+        let c = counts[idx as usize];
+        let o = obs_counts[idx as usize];
+        let e = acc.entry(idx).or_default();
+        e.sum += c as f64;
+        e.sumsq += (c as f64) * (c as f64);
+        e.n_touched += 1;
+        if c >= o {
+            e.n_ge += 1;
+        }
+        if c <= o {
+            e.n_le += 1;
+        }
+        counts[idx as usize] = 0;
+    }
+    touched.clear();
+}
+
+/// How the null is generated.
+#[derive(Clone, Copy, PartialEq)]
+pub enum NullKind {
+    /// permute labels over all nodes
+    Label,
+    /// permute labels only within strata
+    Stratified,
+    /// hold the pairwise edge-type table, randomize the rest
+    Conditional,
+}
+
+/// Full enrichment run: enumerate once, then fold `n_perm` draws into
+/// per-class statistics.
 #[allow(clippy::too_many_arguments)]
 pub fn run_enrichment(
     g: &SpatialGraphRs,
@@ -222,6 +281,8 @@ pub fn run_enrichment(
     seed: u64,
     strata: Option<&[u32]>,
     anchors: Option<&[u32]>,
+    null_kind: NullKind,
+    cond_temp: f64,
 ) -> Result<EnrichOut, String> {
     let topos = topologies(k);
     let n_col = g.color_levels.len();
@@ -254,47 +315,101 @@ pub fn run_enrichment(
         keys.into_iter().map(|kk| m.remove(&kk).unwrap()).collect()
     });
 
-    // permutations, folded straight into per-class accumulators
-    let merged: AHashMap<u32, Acc> = (0..n_perm)
-        .into_par_iter()
-        .fold(
-            || (AHashMap::<u32, Acc>::new(), vec![0u32; dense], Vec::<u32>::new()),
-            |(mut acc, mut counts, mut touched), draw| {
-                let mut rng = SplitMix64(seed ^ (draw as u64).wrapping_mul(0x9E3779B97F4A7C15));
-                let mut cols = g.colors.clone();
-                permute(&mut cols, strata_groups.as_ref(), &mut rng);
-                tally(&inst, &cols, &topos, stride, n_col, &mut counts, &mut touched);
-                for &idx in touched.iter() {
-                    let c = counts[idx as usize];
-                    let o = obs_counts[idx as usize];
-                    let e = acc.entry(idx).or_default();
-                    e.sum += c as f64;
-                    e.sumsq += (c as f64) * (c as f64);
-                    e.n_touched += 1;
-                    if c >= o {
-                        e.n_ge += 1;
+    let reduce_acc = |mut a: AHashMap<u32, Acc>, b: AHashMap<u32, Acc>| {
+        for (kk, v) in b {
+            let e = a.entry(kk).or_default();
+            e.sum += v.sum;
+            e.sumsq += v.sumsq;
+            e.n_ge += v.n_ge;
+            e.n_le += v.n_le;
+            e.n_touched += v.n_touched;
+        }
+        a
+    };
+
+    let (merged, cond_dev, cond_accept, cond_moved): (AHashMap<u32, Acc>, f64, f64, f64) =
+    if null_kind == NullKind::Conditional {
+        // A Markov chain is sequential, so parallelism comes from running one
+        // independent chain per worker rather than from splitting the draws.
+        let n_chains = rayon::current_num_threads().max(1).min(n_perm);
+        let per_chain = n_perm.div_ceil(n_chains);
+        let target = pair_table(g, &g.colors);
+        let burn = 20 * g.n_nodes;
+        let thin = 2 * g.n_nodes;
+
+        let parts: Vec<(AHashMap<u32, Acc>, f64, usize, u64, u64, f64)> = (0..n_chains)
+            .into_par_iter()
+            .map(|ci| {
+                let mut acc = AHashMap::<u32, Acc>::new();
+                let mut counts = vec![0u32; dense];
+                let mut touched = Vec::<u32>::new();
+                let mut rng =
+                    SplitMix64(seed ^ (ci as u64 + 1).wrapping_mul(0x9E3779B97F4A7C15));
+                let mut chain = SwapChain::new(g, target.clone());
+                let nn = g.n_nodes;
+                let mut step = |ch: &mut SwapChain, rng: &mut SplitMix64| {
+                    let u = rng.below(nn) as u32;
+                    let v = rng.below(nn) as u32;
+                    let unit = (rng.next() >> 11) as f64 / (1u64 << 53) as f64;
+                    if u != v {
+                        ch.propose(u, v, cond_temp, unit);
                     }
-                    if c <= o {
-                        e.n_le += 1;
-                    }
-                    counts[idx as usize] = 0;
+                };
+                for _ in 0..burn {
+                    step(&mut chain, &mut rng);
                 }
-                touched.clear();
-                (acc, counts, touched)
-            },
-        )
-        .map(|(acc, _, _)| acc)
-        .reduce(AHashMap::new, |mut a, b| {
-            for (kk, v) in b {
-                let e = a.entry(kk).or_default();
-                e.sum += v.sum;
-                e.sumsq += v.sumsq;
-                e.n_ge += v.n_ge;
-                e.n_le += v.n_le;
-                e.n_touched += v.n_touched;
-            }
-            a
-        });
+                let mut dev = 0f64;
+                let mut moved = 0f64;
+                let start = ci * per_chain;
+                let end = ((ci + 1) * per_chain).min(n_perm);
+                for _ in start..end {
+                    for _ in 0..thin {
+                        step(&mut chain, &mut rng);
+                    }
+                    dev += chain.energy as f64;
+                    moved += chain.displaced();
+                    tally(&inst, &chain.colors, &topos, stride, n_col, &mut counts, &mut touched);
+                    fold_draw(&mut counts, &mut touched, &obs_counts, &mut acc);
+                }
+                (
+                    acc, dev, end.saturating_sub(start),
+                    chain.n_proposed, chain.n_accepted, moved,
+                )
+            })
+            .collect();
+
+        let total: f64 = parts.iter().map(|p| p.1).sum();
+        let ndraw: usize = parts.iter().map(|p| p.2).sum();
+        let prop: u64 = parts.iter().map(|p| p.3).sum();
+        let acc_n: u64 = parts.iter().map(|p| p.4).sum();
+        let movsum: f64 = parts.iter().map(|p| p.5).sum();
+        let m = parts
+            .into_iter()
+            .map(|p| p.0)
+            .fold(AHashMap::new(), reduce_acc);
+        let d = if ndraw > 0 { total / ndraw as f64 } else { 0.0 };
+        let a = if prop > 0 { acc_n as f64 / prop as f64 } else { 0.0 };
+        let mv = if ndraw > 0 { movsum / ndraw as f64 } else { 0.0 };
+        (m, d, a, mv)
+    } else {
+        let m = (0..n_perm)
+            .into_par_iter()
+            .fold(
+                || (AHashMap::<u32, Acc>::new(), vec![0u32; dense], Vec::<u32>::new()),
+                |(mut acc, mut counts, mut touched), draw| {
+                    let mut rng =
+                        SplitMix64(seed ^ (draw as u64).wrapping_mul(0x9E3779B97F4A7C15));
+                    let mut cols = g.colors.clone();
+                    permute(&mut cols, strata_groups.as_ref(), &mut rng);
+                    tally(&inst, &cols, &topos, stride, n_col, &mut counts, &mut touched);
+                    fold_draw(&mut counts, &mut touched, &obs_counts, &mut acc);
+                    (acc, counts, touched)
+                },
+            )
+            .map(|(acc, _, _)| acc)
+            .reduce(AHashMap::new, reduce_acc);
+        (m, 0.0, f64::NAN, f64::NAN)
+    };
 
     // report every class seen in the observed graph or in any draw
     let mut all: Vec<u32> = obs_touched.clone();
@@ -312,6 +427,15 @@ pub fn run_enrichment(
         p_enrich: Vec::with_capacity(all.len()),
         p_deplete: Vec::with_capacity(all.len()),
         n_instances: n_inst,
+        cond_dev,
+        n_edges: g.edge_keys.len(),
+        cond_accept,
+        cond_moved,
+        cond_moves_per_draw: if cond_accept.is_finite() {
+            cond_accept * (2 * g.n_nodes) as f64
+        } else {
+            f64::NAN
+        },
     };
 
     for idx in all {
@@ -364,7 +488,7 @@ mod tests {
             vec!["A", "B", "A", "B", "A", "B"],
         );
         for k in 2..=4 {
-            let r = run_enrichment(&g, k, 50, 1, None, None).unwrap();
+            let r = run_enrichment(&g, k, 50, 1, None, None, NullKind::Label, 1.0).unwrap();
             let tot: f64 = r.observed.iter().sum();
             assert_eq!(tot as usize, r.n_instances, "k={}", k);
         }
@@ -380,7 +504,7 @@ mod tests {
             vec!["A", "B", "C", "A", "B", "C", "A", "B"],
         );
         for k in 2..=4 {
-            let r = run_enrichment(&g, k, 200, 7, None, None).unwrap();
+            let r = run_enrichment(&g, k, 200, 7, None, None, NullKind::Label, 1.0).unwrap();
             let tot: f64 = r.mean_null.iter().sum();
             assert!(
                 (tot - r.n_instances as f64).abs() < 1e-9,
@@ -397,7 +521,7 @@ mod tests {
             &[(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 6), (6, 0)],
             vec!["A", "A", "B", "B", "C", "C", "A"],
         );
-        let r = run_enrichment(&g, 3, 99, 3, None, None).unwrap();
+        let r = run_enrichment(&g, 3, 99, 3, None, None, NullKind::Label, 1.0).unwrap();
         for i in 0..r.observed.len() {
             assert!(r.p_enrich[i] > 0.0 && r.p_enrich[i] <= 1.0);
             assert!(r.p_deplete[i] > 0.0 && r.p_deplete[i] <= 1.0);
@@ -413,7 +537,7 @@ mod tests {
             &[(0, 1), (1, 2), (2, 3), (3, 4), (4, 0)],
             vec!["A", "A", "A", "A", "A"],
         );
-        let r = run_enrichment(&g, 3, 20, 1, None, None).unwrap();
+        let r = run_enrichment(&g, 3, 20, 1, None, None, NullKind::Label, 1.0).unwrap();
         // C5 has 5 wedges and no triangles -> exactly one class
         assert_eq!(r.observed.len(), 1);
         assert_eq!(r.topo_name[0], "open");
@@ -430,9 +554,9 @@ mod tests {
             &[(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 0)],
             vec!["A", "B", "A", "B", "A", "B"],
         );
-        let a = run_enrichment(&g, 3, 50, 42, None, None).unwrap();
-        let b = run_enrichment(&g, 3, 50, 42, None, None).unwrap();
-        let c = run_enrichment(&g, 3, 50, 43, None, None).unwrap();
+        let a = run_enrichment(&g, 3, 50, 42, None, None, NullKind::Label, 1.0).unwrap();
+        let b = run_enrichment(&g, 3, 50, 42, None, None, NullKind::Label, 1.0).unwrap();
+        let c = run_enrichment(&g, 3, 50, 43, None, None, NullKind::Label, 1.0).unwrap();
         assert_eq!(a.mean_null, b.mean_null);
         assert_ne!(a.mean_null, c.mean_null);
     }
@@ -447,7 +571,7 @@ mod tests {
             vec!["A", "A", "A", "B", "B", "B"],
         );
         let strata = vec![0u32, 0, 0, 1, 1, 1];
-        let r = run_enrichment(&g, 3, 50, 5, Some(&strata), None).unwrap();
+        let r = run_enrichment(&g, 3, 50, 5, Some(&strata), None, NullKind::Stratified, 1.0).unwrap();
         for i in 0..r.observed.len() {
             assert!((r.mean_null[i] - r.observed[i]).abs() < 1e-9);
             assert!(r.sd_null[i] < 1e-9);
@@ -501,7 +625,7 @@ mod scale {
             drop(inst);
 
             let t1 = Instant::now();
-            let r = run_enrichment(&g, k, np, 1, None, None).unwrap();
+            let r = run_enrichment(&g, k, np, 1, None, None, NullKind::Label, 1.0).unwrap();
             let t_all = t1.elapsed().as_secs_f64();
             println!(
                 "n={:>7} k={} perms={:>5} | edges={:>9} instances={:>12} classes={:>7} \

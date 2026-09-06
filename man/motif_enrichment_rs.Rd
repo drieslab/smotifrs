@@ -12,6 +12,8 @@ motif_enrichment_rs(
   size = 3L,
   n_perm = 1000L,
   seed = 1L,
+  null = c("label", "stratified", "conditional"),
+  cond_temp = 1,
   strata = NULL,
   anchored_on = NULL
 )
@@ -32,9 +34,39 @@ node, in node-index order.}
 \item{seed}{integer seed. Results depend only on \verb{(seed, draw index)}, never
 on thread scheduling.}
 
-\item{strata}{optional factor or integer vector, one per node. When given,
-labels are only exchanged between nodes sharing a stratum, which preserves
-each stratum's cell type composition exactly.}
+\item{null}{which null to test against.
+\itemize{
+\item \code{"label"} shuffles labels over all nodes. Answers "is this motif more
+common than the tissue's cell type composition implies".
+\item \code{"stratified"} shuffles only within \code{strata}, preserving each stratum's
+composition exactly.
+\item \code{"conditional"} holds the observed \strong{pairwise} edge-type composition
+and randomizes everything else, so a size-3 or size-4 motif that is
+still enriched is enriched \emph{beyond} what its constituent pairs already
+explain. Under \code{"label"} any motif built from an attracting pair looks
+enriched, and the higher-order signal cannot be separated from an echo
+of the pairwise one.
+}
+
+The conditional null conditions by tolerance, not exactly: a Metropolis
+chain over label swaps holds the pairwise table close rather than pinning
+it. Three attributes report what the chain actually did -- \code{cond_dev} (the
+table deviation, as a fraction of all edges), \code{cond_accept} (acceptance
+rate) and \code{cond_moved} (mean fraction of labels displaced from the observed
+assignment). Report them rather than assuming the constraint held.
+
+Watch \code{cond_moved} in particular. A chain held too cold barely moves, so
+every draw is essentially the observed data and \emph{everything} comes back
+non-significant -- a failure that looks like a clean result. Below 5\%
+displacement this warns.}
+
+\item{cond_temp}{Metropolis temperature for \code{null = "conditional"}. Lower
+holds the pairwise table tighter but mixes more slowly.}
+
+\item{strata}{optional factor or integer vector, one per node. Required for
+\code{null = "stratified"}. When given, labels are only exchanged between nodes
+sharing a stratum, which preserves each stratum's cell type composition
+exactly.}
 
 \item{anchored_on}{optional integer vector of 1-based node indices.
 Enumeration is restricted to subgraphs containing at least one of them.}
@@ -44,6 +76,14 @@ a \code{data.table}, one row per motif class, with columns \code{motif_id},
 \code{topology}, \code{size}, \code{color_tuple} (a list column of labels in canonical
 orbit order), \code{observed}, \code{expected}, \code{sd_null}, \code{z}, \code{fold}, \code{p_enrich},
 \code{p_deplete} and \code{p_adj}. \code{n_instances} is attached as an attribute.
+
+Positions within \code{color_tuple} are structural roles, not an arbitrary
+sort, so \code{A-B-B} and \code{B-A-A} are different motifs. The first position is
+the distinguished vertex wherever a topology has one: the centre of a
+\code{open} wedge or a \code{claw}, and the degree-3 vertex of a \code{paw}. For \code{path}
+the tuple runs end to end, for \code{cycle} it runs around the ring, and for
+\code{closed} (triangle), \code{diamond} and \code{K4} the remaining positions are
+interchangeable within their degree class.
 }
 \description{
 Enumerates every connected induced subgraph of the given size, then tests
