@@ -17,7 +17,7 @@ path = 'document.rs'
 extendr-api = '0.9.0'
 ahash = '0.8'
 rayon = '1.10'
-arrow = { version = '55', default-features = false, features = ['ipc'] }
+arrow = { version = '55', default-features = false, features = ['ipc', 'ffi'] }
 parquet = { version = '55', default-features = false, features = ['arrow', 'snap', 'zstd', 'lz4'] }
 
 [profile.release]

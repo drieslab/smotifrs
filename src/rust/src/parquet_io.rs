@@ -10,6 +10,7 @@
 use std::fs::File;
 
 use ahash::AHashMap;
+use arrow::ffi_stream::{ArrowArrayStreamReader, FFI_ArrowArrayStream};
 use arrow::array::{Array, Int32Array, Int64Array, StringArray};
 use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
@@ -175,6 +176,69 @@ pub fn graph_from_edge_store(
     for b in &edge_batches {
         let f = col_ints(b, "from_id")?;
         let t = col_ints(b, "to_id")?;
+        for i in 0..b.num_rows() {
+            let (a, c) = (f[i], t[i]);
+            let si = *dense
+                .get(&a)
+                .ok_or_else(|| format!("edge from_id {} not in the node sidecar", a))?;
+            let ti = *dense
+                .get(&c)
+                .ok_or_else(|| format!("edge to_id {} not in the node sidecar", c))?;
+            sources.push(si);
+            targets.push(ti);
+        }
+    }
+    SpatialGraphRs::build_coded(n, colors, color_levels, &sources, &targets)
+}
+
+/// Build a graph from an Arrow stream of edges plus the node sidecar R holds.
+///
+/// The counterpart of [`graph_from_edge_store`] for a producer that is not a
+/// file: R applies whatever narrowing it owes -- a `parquetEdgeStore`'s
+/// pending `@ops`, a partitioned dataset, a query over something that is not
+/// parquet at all -- and hands over the result as an Arrow stream. Reading
+/// the store's files by path cannot see any of that, because a pending subset
+/// is not on disk.
+///
+/// `stream_addr` is the address of a populated `ArrowArrayStream` struct whose
+/// ownership moves here; the reader releases it on drop. The stream must yield
+/// integer `from_id` / `to_id` columns. `int_ids` gives the node universe in
+/// the same order as `colors`, exactly as the sidecar does on the path side.
+pub fn graph_from_edge_stream(
+    stream_addr: usize,
+    int_ids: Vec<u32>,
+    colors: Vec<u32>,
+    color_levels: Vec<String>,
+) -> Result<SpatialGraphRs, String> {
+    let n = int_ids.len();
+    if colors.len() != n {
+        return Err(format!(
+            "colors length {} != node count {}",
+            colors.len(),
+            n
+        ));
+    }
+    if stream_addr == 0 {
+        return Err("the ArrowArrayStream pointer is null".to_string());
+    }
+
+    // int_id -> dense position; same contract as the path reader, so an id
+    // universe with gaps (a subset store) works unchanged
+    let mut dense: AHashMap<u32, u32> = AHashMap::with_capacity(n);
+    for (pos, &iid) in int_ids.iter().enumerate() {
+        dense.insert(iid, pos as u32);
+    }
+
+    let raw = stream_addr as *mut FFI_ArrowArrayStream;
+    let reader = unsafe { ArrowArrayStreamReader::from_raw(raw) }
+        .map_err(|e| format!("could not import the Arrow stream: {}", e))?;
+
+    let mut sources = Vec::new();
+    let mut targets = Vec::new();
+    for batch in reader {
+        let b = batch.map_err(|e| format!("could not pull an Arrow batch: {}", e))?;
+        let f = col_ints(&b, "from_id")?;
+        let t = col_ints(&b, "to_id")?;
         for i in 0..b.num_rows() {
             let (a, c) = (f[i], t[i]);
             let si = *dense

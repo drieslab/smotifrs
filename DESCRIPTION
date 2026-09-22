@@ -22,6 +22,7 @@ Suggests:
     igraph,
     ggplot2,
     knitr,
+    nanoarrow,
     rmarkdown,
     smotif,
     testthat (>= 3.0.0),
