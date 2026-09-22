@@ -6,12 +6,17 @@
 \alias{smotifrs-package}
 \title{smotifrs: Rust backend for smotif motif enumeration}
 \description{
-Drop-in Rust acceleration for the \link[smotif:smotif-package]{smotif::smotif} R package: parallel
+Drop-in Rust acceleration for the \link[smotif:smotif]{smotif} R package: parallel
 enumeration of size-2 / size-3 / size-4 motifs in spatial omics
 graphs, plus direct parquet I/O for million-cell datasets.
 }
 \author{
 \strong{Maintainer}: Ruben Dries \email{rdries@bu.edu}
+
+Authors:
+\itemize{
+  \item Ruben Dries \email{rdries@bu.edu}
+}
 
 }
 \keyword{internal}

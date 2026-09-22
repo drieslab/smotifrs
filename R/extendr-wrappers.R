@@ -22,4 +22,30 @@ rs_find_motifs <- function(cell_ids, cell_types, edge_source, edge_target, size,
 #' @keywords internal
 rs_find_motifs_from_parquet <- function(nodes_path, edges_path, size, colored, anchored_on_idx) .Call(wrap__rs_find_motifs_from_parquet, nodes_path, edges_path, size, colored, anchored_on_idx)
 
+#' Internal FFI: enumerate motifs and test enrichment in one call, returning
+#' only per-class statistics. Per-instance data never crosses into R.
+#'
+#' Cell types arrive as 1-based integer codes plus a level table so that R owns
+#' the level ordering; this avoids allocating one string per cell and keeps the
+#' two backends from disagreeing under different locale collations.
+#'
+#' @keywords internal
+rs_motif_enrichment <- function(n_nodes, type_codes, type_levels, edge_source, edge_target, size, n_perm, seed, strata, anchored_on, null_kind, cond_temp) .Call(wrap__rs_motif_enrichment, n_nodes, type_codes, type_levels, edge_source, edge_target, size, n_perm, seed, strata, anchored_on, null_kind, cond_temp)
+
+#' Internal FFI: vertices of instances belonging to named motif classes.
+#'
+#' @keywords internal
+rs_motif_instances <- function(n_nodes, type_codes, type_levels, edge_source, edge_target, size, motif_ids, max_per_class) .Call(wrap__rs_motif_instances, n_nodes, type_codes, type_levels, edge_source, edge_target, size, motif_ids, max_per_class)
+
+#' Internal FFI: motif enrichment read straight from a GiottoDisk
+#' `parquetEdgeStore`, without materializing the graph in R.
+#'
+#' @keywords internal
+rs_motif_enrichment_edge_store <- function(nodes_path, edges_path, type_codes, type_levels, size, n_perm, seed, null_kind, cond_temp) .Call(wrap__rs_motif_enrichment_edge_store, nodes_path, edges_path, type_codes, type_levels, size, n_perm, seed, null_kind, cond_temp)
+
+#' Internal FFI: node ids and int codes from a `parquetEdgeStore` sidecar.
+#'
+#' @keywords internal
+rs_edge_store_nodes <- function(nodes_path) .Call(wrap__rs_edge_store_nodes, nodes_path)
+
 # nolint end

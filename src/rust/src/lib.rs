@@ -2,6 +2,10 @@ use extendr_api::prelude::*;
 use extendr_api::Result;
 
 mod canonical;
+mod conditional;
+mod enrich;
+mod esu;
+mod motifclass;
 mod graph;
 mod motifs;
 mod parquet_io;
@@ -177,6 +181,273 @@ fn rs_find_motifs_from_parquet(
     Ok(motif_result_to_list(&result))
 }
 
+/// Internal FFI: enumerate motifs and test enrichment in one call, returning
+/// only per-class statistics. Per-instance data never crosses into R.
+///
+/// Cell types arrive as 1-based integer codes plus a level table so that R owns
+/// the level ordering; this avoids allocating one string per cell and keeps the
+/// two backends from disagreeing under different locale collations.
+///
+/// @keywords internal
+#[extendr]
+#[allow(clippy::too_many_arguments)]
+fn rs_motif_enrichment(
+    n_nodes: i32,
+    type_codes: Integers,
+    type_levels: Vec<String>,
+    edge_source: Integers,
+    edge_target: Integers,
+    size: i32,
+    n_perm: i32,
+    seed: i32,
+    strata: Robj,
+    anchored_on: Robj,
+    null_kind: &str,
+    cond_temp: f64,
+) -> Result<List> {
+    let n = n_nodes as usize;
+    if type_codes.len() != n {
+        return Err(Error::Other(format!(
+            "type_codes length {} != n_nodes {}",
+            type_codes.len(),
+            n
+        )));
+    }
+    if edge_source.len() != edge_target.len() {
+        return Err(Error::Other("edge_source/edge_target length mismatch".into()));
+    }
+    if !(2..=4).contains(&size) {
+        return Err(Error::Other(format!("size must be 2, 3 or 4; got {}", size)));
+    }
+    let colors: Vec<u32> = type_codes.iter().map(|i| (i.0 - 1) as u32).collect();
+    let src = integers_to_u32(&edge_source);
+    let tgt = integers_to_u32(&edge_target);
+    let g = SpatialGraphRs::build_coded(n, colors, type_levels, &src, &tgt)
+        .map_err(Error::Other)?;
+
+    let strata_vec: Option<Vec<u32>> = if strata.is_null() {
+        None
+    } else {
+        let ints = Integers::try_from(strata)
+            .map_err(|e| Error::Other(format!("strata: {:?}", e)))?;
+        if ints.len() != n {
+            return Err(Error::Other(format!(
+                "strata length {} != n_nodes {}",
+                ints.len(),
+                n
+            )));
+        }
+        Some(ints.iter().map(|i| i.0 as u32).collect())
+    };
+    let anchors: Option<Vec<u32>> = if anchored_on.is_null() {
+        None
+    } else {
+        let ints = Integers::try_from(anchored_on)
+            .map_err(|e| Error::Other(format!("anchored_on: {:?}", e)))?;
+        Some(integers_to_u32(&ints))
+    };
+
+    let nk = match null_kind {
+        "label" => crate::enrich::NullKind::Label,
+        "stratified" => crate::enrich::NullKind::Stratified,
+        "conditional" => crate::enrich::NullKind::Conditional,
+        other => {
+            return Err(Error::Other(format!(
+                "unknown null '{}'; expected label, stratified or conditional",
+                other
+            )))
+        }
+    };
+    if nk == crate::enrich::NullKind::Stratified && strata_vec.is_none() {
+        return Err(Error::Other(
+            "the stratified null needs a strata vector".into(),
+        ));
+    }
+
+    let r = crate::enrich::run_enrichment(
+        &g,
+        size as usize,
+        n_perm as usize,
+        seed as u64,
+        strata_vec.as_deref(),
+        anchors.as_deref(),
+        nk,
+        cond_temp,
+    )
+    .map_err(Error::Other)?;
+
+    let k = size as usize;
+    let nclass = r.observed.len();
+    // colors flattened row-major, k per class; R reshapes to a matrix
+    let mut colors_flat: Vec<Rstr> = Vec::with_capacity(nclass * k);
+    let mut motif_id: Vec<String> = Vec::with_capacity(nclass);
+    for (i, cc) in r.color_codes.iter().enumerate() {
+        let names: Vec<&str> = cc
+            .iter()
+            .map(|&c| g.color_levels[c as usize].as_str())
+            .collect();
+        for nm in &names {
+            colors_flat.push(Rstr::from(*nm));
+        }
+        motif_id.push(format!(
+            "size{}_{}_{}",
+            k,
+            r.topo_name[i],
+            names.join("-")
+        ));
+    }
+
+    Ok(list!(
+        motif_id = motif_id,
+        topology = r.topo_name.clone(),
+        size = vec![size; nclass],
+        color_flat = Strings::from_values(colors_flat),
+        observed = r.observed.clone(),
+        mean_null = r.mean_null.clone(),
+        sd_null = r.sd_null.clone(),
+        p_enrich = r.p_enrich.clone(),
+        p_deplete = r.p_deplete.clone(),
+        n_instances = r.n_instances as f64,
+        n_perm = n_perm,
+        k = size,
+        cond_dev = r.cond_dev,
+        n_edges = r.n_edges as f64,
+        cond_accept = r.cond_accept,
+        cond_moved = r.cond_moved,
+        cond_moves_per_draw = r.cond_moves_per_draw,
+        n_nodes_out = n_nodes
+    ))
+}
+
+/// Internal FFI: vertices of instances belonging to named motif classes.
+///
+/// @keywords internal
+#[extendr]
+#[allow(clippy::too_many_arguments)]
+fn rs_motif_instances(
+    n_nodes: i32,
+    type_codes: Integers,
+    type_levels: Vec<String>,
+    edge_source: Integers,
+    edge_target: Integers,
+    size: i32,
+    motif_ids: Vec<String>,
+    max_per_class: i32,
+) -> Result<List> {
+    let n = n_nodes as usize;
+    if !(2..=4).contains(&size) {
+        return Err(Error::Other(format!("size must be 2, 3 or 4; got {}", size)));
+    }
+    let colors: Vec<u32> = type_codes.iter().map(|i| (i.0 - 1) as u32).collect();
+    let src = integers_to_u32(&edge_source);
+    let tgt = integers_to_u32(&edge_target);
+    let g = SpatialGraphRs::build_coded(n, colors, type_levels, &src, &tgt)
+        .map_err(Error::Other)?;
+    let (verts, which) = crate::enrich::collect_instances(
+        &g,
+        size as usize,
+        &motif_ids,
+        if max_per_class <= 0 { usize::MAX } else { max_per_class as usize },
+    )
+    .map_err(Error::Other)?;
+    Ok(list!(
+        verts = verts,
+        which = which.iter().map(|w| *w as i32 + 1).collect::<Vec<i32>>(),
+        k = size
+    ))
+}
+
+/// Internal FFI: motif enrichment read straight from a GiottoDisk
+/// `parquetEdgeStore`, without materializing the graph in R.
+///
+/// @keywords internal
+#[extendr]
+#[allow(clippy::too_many_arguments)]
+fn rs_motif_enrichment_edge_store(
+    nodes_path: String,
+    edges_path: String,
+    type_codes: Integers,
+    type_levels: Vec<String>,
+    size: i32,
+    n_perm: i32,
+    seed: i32,
+    null_kind: &str,
+    cond_temp: f64,
+) -> Result<List> {
+    if !(2..=4).contains(&size) {
+        return Err(Error::Other(format!("size must be 2, 3 or 4; got {}", size)));
+    }
+    let colors: Vec<u32> = type_codes.iter().map(|i| (i.0 - 1) as u32).collect();
+    let g = parquet_io::graph_from_edge_store(
+        &nodes_path,
+        &edges_path,
+        colors,
+        type_levels,
+    )
+    .map_err(Error::Other)?;
+    let nk = match null_kind {
+        "label" => crate::enrich::NullKind::Label,
+        "conditional" => crate::enrich::NullKind::Conditional,
+        other => {
+            return Err(Error::Other(format!(
+                "unknown null '{}' for the edge-store path", other
+            )))
+        }
+    };
+    let r = crate::enrich::run_enrichment(
+        &g, size as usize, n_perm as usize, seed as u64, None, None, nk, cond_temp,
+    )
+    .map_err(Error::Other)?;
+
+    let k = size as usize;
+    let nclass = r.observed.len();
+    let mut colors_flat: Vec<Rstr> = Vec::with_capacity(nclass * k);
+    let mut motif_id: Vec<String> = Vec::with_capacity(nclass);
+    for (i, cc) in r.color_codes.iter().enumerate() {
+        let names: Vec<&str> = cc
+            .iter()
+            .map(|&c| g.color_levels[c as usize].as_str())
+            .collect();
+        for nm in &names {
+            colors_flat.push(Rstr::from(*nm));
+        }
+        motif_id.push(format!("size{}_{}_{}", k, r.topo_name[i], names.join("-")));
+    }
+    Ok(list!(
+        motif_id = motif_id,
+        topology = r.topo_name.clone(),
+        size = vec![size; nclass],
+        color_flat = Strings::from_values(colors_flat),
+        observed = r.observed.clone(),
+        mean_null = r.mean_null.clone(),
+        sd_null = r.sd_null.clone(),
+        p_enrich = r.p_enrich.clone(),
+        p_deplete = r.p_deplete.clone(),
+        n_instances = r.n_instances as f64,
+        n_perm = n_perm,
+        k = size,
+        cond_dev = r.cond_dev,
+        n_edges = r.n_edges as f64,
+        cond_accept = r.cond_accept,
+        cond_moved = r.cond_moved,
+        cond_moves_per_draw = r.cond_moves_per_draw,
+        n_nodes_out = g.n_nodes as i32
+    ))
+}
+
+/// Internal FFI: node ids and int codes from a `parquetEdgeStore` sidecar.
+///
+/// @keywords internal
+#[extendr]
+fn rs_edge_store_nodes(nodes_path: String) -> Result<List> {
+    let (ids, ints) = parquet_io::nodes_from_edge_store(&nodes_path)
+        .map_err(Error::Other)?;
+    Ok(list!(
+        node_id = ids,
+        int_id = ints.iter().map(|v| *v as i32).collect::<Vec<i32>>()
+    ))
+}
+
 /// Internal smoke-test entry point used during package build.
 ///
 /// @keywords internal
@@ -190,4 +461,8 @@ extendr_module! {
     fn hello_world;
     fn rs_find_motifs;
     fn rs_find_motifs_from_parquet;
+    fn rs_motif_enrichment;
+    fn rs_motif_instances;
+    fn rs_motif_enrichment_edge_store;
+    fn rs_edge_store_nodes;
 }
