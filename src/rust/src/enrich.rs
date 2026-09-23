@@ -64,6 +64,20 @@ pub fn build_instances(
     topos: &[Topology],
     anchors: Option<&[u32]>,
 ) -> InstanceStore {
+    build_instances_range(g, k, topos, anchors, 0, g.n_nodes as u32)
+}
+
+/// As [`build_instances`], restricted to ESU roots in `[lo, hi)`. Roots
+/// partition the output, so the union over a partition of `0..n_nodes` is
+/// exactly `build_instances`, with no instance produced twice.
+pub fn build_instances_range(
+    g: &SpatialGraphRs,
+    k: usize,
+    topos: &[Topology],
+    anchors: Option<&[u32]>,
+    lo: u32,
+    hi: u32,
+) -> InstanceStore {
     let canon_to_idx: AHashMap<u8, u8> = topos
         .iter()
         .enumerate()
@@ -80,7 +94,7 @@ pub fn build_instances(
         m
     });
 
-    let roots: Vec<u32> = (0..g.n_nodes as u32).collect();
+    let roots: Vec<u32> = (lo..hi).collect();
     let parts: Vec<(Vec<u8>, Vec<u32>)> = roots
         .par_iter()
         .fold(
@@ -411,8 +425,31 @@ pub fn run_enrichment(
         (m, 0.0, f64::NAN, f64::NAN)
     };
 
+    finish_enrichment(
+        g, k, n_perm, &topos, stride, n_col, &obs_counts, &obs_touched, &merged, n_inst,
+        cond_dev, cond_accept, cond_moved,
+    )
+}
+
+/// Shared tail: turn per-class accumulators into the reported table.
+#[allow(clippy::too_many_arguments)]
+fn finish_enrichment(
+    g: &SpatialGraphRs,
+    k: usize,
+    n_perm: usize,
+    topos: &[Topology],
+    stride: usize,
+    n_col: usize,
+    obs_counts: &[u32],
+    obs_touched: &[u32],
+    merged: &AHashMap<u32, Acc>,
+    n_inst: usize,
+    cond_dev: f64,
+    cond_accept: f64,
+    cond_moved: f64,
+) -> Result<EnrichOut, String> {
     // report every class seen in the observed graph or in any draw
-    let mut all: Vec<u32> = obs_touched.clone();
+    let mut all: Vec<u32> = obs_touched.to_vec();
     all.extend(merged.keys().copied());
     all.sort_unstable();
     all.dedup();
@@ -699,4 +736,123 @@ pub fn collect_instances(
         }
     }
     Ok((verts, which))
+}
+
+/// PROTOTYPE: the label null with the block/draw loops interchanged.
+///
+/// `run_enrichment` materializes every instance, then sweeps the draws over
+/// that one store. Here the vertex range is cut into `n_blocks` pieces and each
+/// piece's instances live only long enough to be tallied under every draw, so
+/// peak memory is one block's instances rather than all of them.
+///
+/// Correct because ESU roots partition the instances (see
+/// [`build_instances_range`]) and the per-class counts a draw is judged on are
+/// plain sums over instances. The draws must agree across blocks, which they do
+/// because a draw's permutation depends only on `(seed, draw)` -- so each block
+/// regenerates the identical permutation rather than storing it. That
+/// regeneration is the cost: `n_blocks * n_perm` shuffles instead of `n_perm`.
+///
+/// Label null only; the conditional null carries chain state across draws and
+/// would need its own treatment.
+pub fn run_enrichment_blocked(
+    g: &SpatialGraphRs,
+    k: usize,
+    n_perm: usize,
+    seed: u64,
+    strata: Option<&[u32]>,
+    anchors: Option<&[u32]>,
+    n_blocks: usize,
+) -> Result<EnrichOut, String> {
+    let topos = topologies(k);
+    let n_col = g.color_levels.len();
+    let stride = n_col.checked_pow(k as u32).ok_or("cell type count overflows")?;
+    let dense = topos.len().checked_mul(stride).ok_or("class space overflows")?;
+    if dense > MAX_DENSE {
+        return Err(format!("class address space is {}, above the {} limit", dense, MAX_DENSE));
+    }
+    let n_blocks = n_blocks.max(1).min(g.n_nodes.max(1));
+
+    let strata_groups: Option<Vec<Vec<u32>>> = strata.map(|s| {
+        let mut m: AHashMap<u32, Vec<u32>> = AHashMap::new();
+        for (i, &v) in s.iter().enumerate() {
+            m.entry(v).or_default().push(i as u32);
+        }
+        let mut keys: Vec<u32> = m.keys().copied().collect();
+        keys.sort_unstable();
+        keys.into_iter().map(|kk| m.remove(&kk).unwrap()).collect()
+    });
+
+    let mut obs_counts = vec![0u32; dense];
+    let mut obs_touched: Vec<u32> = Vec::new();
+    // class -> per-draw totals, summed across blocks. Sparse over classes that
+    // actually occur, which is what keeps this small: dense * n_perm would not
+    // be affordable, but touched * n_perm is kilobytes.
+    let mut draw_counts: AHashMap<u32, Vec<u32>> = AHashMap::new();
+    let mut n_inst = 0usize;
+
+    let bsize = g.n_nodes.div_ceil(n_blocks);
+    for b in 0..n_blocks {
+        let lo = b * bsize;
+        let hi = ((b + 1) * bsize).min(g.n_nodes);
+        if lo >= hi {
+            continue;
+        }
+        let inst = build_instances_range(g, k, &topos, anchors, lo as u32, hi as u32);
+        n_inst += inst.len();
+        if inst.is_empty() {
+            continue;
+        }
+
+        // this block's contribution to the observed counts
+        tally(&inst, &g.colors, &topos, stride, n_col, &mut obs_counts, &mut obs_touched);
+
+        // and to every draw
+        let per_draw: Vec<Vec<(u32, u32)>> = (0..n_perm)
+            .into_par_iter()
+            .map(|draw| {
+                let mut rng =
+                    SplitMix64(seed ^ (draw as u64).wrapping_mul(0x9E3779B97F4A7C15));
+                let mut cols = g.colors.clone();
+                permute(&mut cols, strata_groups.as_ref(), &mut rng);
+                let mut counts = vec![0u32; dense];
+                let mut touched: Vec<u32> = Vec::new();
+                tally(&inst, &cols, &topos, stride, n_col, &mut counts, &mut touched);
+                touched.iter().map(|&i| (i, counts[i as usize])).collect()
+            })
+            .collect();
+
+        for (draw, pairs) in per_draw.into_iter().enumerate() {
+            for (idx, c) in pairs {
+                draw_counts
+                    .entry(idx)
+                    .or_insert_with(|| vec![0u32; n_perm])[draw] += c;
+            }
+        }
+    }
+
+    // fold: a draw only "touched" a class if its total over all blocks is > 0
+    let mut merged: AHashMap<u32, Acc> = AHashMap::with_capacity(draw_counts.len());
+    for (&idx, per) in draw_counts.iter() {
+        let o = obs_counts[idx as usize];
+        let e = merged.entry(idx).or_default();
+        for &c in per.iter() {
+            if c == 0 {
+                continue;
+            }
+            e.sum += c as f64;
+            e.sumsq += (c as f64) * (c as f64);
+            e.n_touched += 1;
+            if c >= o {
+                e.n_ge += 1;
+            }
+            if c <= o {
+                e.n_le += 1;
+            }
+        }
+    }
+
+    finish_enrichment(
+        g, k, n_perm, &topos, stride, n_col, &obs_counts, &obs_touched, &merged, n_inst,
+        0.0, f64::NAN, f64::NAN,
+    )
 }

@@ -48,4 +48,9 @@ rs_motif_enrichment_edge_store <- function(nodes_path, edges_path, type_codes, t
 #' @keywords internal
 rs_edge_store_nodes <- function(nodes_path) .Call(wrap__rs_edge_store_nodes, nodes_path)
 
+#' PROTOTYPE: blocked label-null enrichment from a GiottoDisk edge store.
+#'
+#' @keywords internal
+rs_motif_enrichment_edge_store_blocked <- function(nodes_path, edges_path, type_codes, type_levels, size, n_perm, seed, n_blocks) .Call(wrap__rs_motif_enrichment_edge_store_blocked, nodes_path, edges_path, type_codes, type_levels, size, n_perm, seed, n_blocks)
+
 # nolint end
