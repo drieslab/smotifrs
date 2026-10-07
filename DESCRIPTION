@@ -1,6 +1,6 @@
 Package: smotifrs
 Title: Rust backend for smotif motif enumeration
-Version: 0.1.0
+Version: 0.2.0
 Authors@R: 
     person("Ruben", "Dries", , "rdries@bu.edu", role = c("aut", "cre"))
 Description: Drop-in Rust acceleration for the smotif R package: parallel
