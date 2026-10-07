@@ -20,10 +20,9 @@ motif_enrichment_stream(
 an \code{arrow::RecordBatchReader}, \code{Table}, or \code{Dataset} query. Batches must
 carry integer \code{from_id} and \code{to_id} columns.}
 
-\item{int_ids}{integer node universe, in the same order as \code{cell_type}.
-Every edge endpoint must appear in it. Gaps are fine: the ids are
-remapped onto a dense range, so a subsetted universe works unchanged.
-\code{\link[=edge_store_nodes]{edge_store_nodes()}} returns this for a store.}
+\item{int_ids}{integer ids keying the label lookup, in the same order as
+\code{cell_type}, without duplicates. Every edge endpoint must appear; ids the
+stream never uses are ignored.}
 
 \item{cell_type}{factor or character vector of labels, one per entry of
 \code{int_ids}.}
@@ -54,10 +53,16 @@ decision to the producer --
 pending ops before yielding any batch -- and leaves this package knowing
 only that batches arrive with \code{from_id} and \code{to_id} columns.
 
+The network's nodes are the stream's endpoints. Labels travel beside the
+stream as a lookup keyed by \code{int_ids}; mapping cell IDs to those integers
+(a store's node sidecar, say) is the caller's business, and nothing here
+reads it. The lookup may cover more ids than the stream uses -- a node with
+no edges is not in the network and does not enter the null -- but every
+endpoint needs a label.
+
 Ownership of the stream moves to Rust, which releases it when the last
 batch has been pulled. Pass a fresh stream per call.
 }
 \seealso{
-\code{\link[=motif_enrichment_edge_store]{motif_enrichment_edge_store()}} for the path-based form,
-\code{\link[=edge_store_nodes]{edge_store_nodes()}} for the node universe.
+\code{\link[=motif_enrichment_edge_store]{motif_enrichment_edge_store()}} for the path-based form.
 }
