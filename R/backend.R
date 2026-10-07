@@ -554,16 +554,22 @@ edge_store_nodes <- function(nodes_path) {
 #' pending ops before yielding any batch -- and leaves this package knowing
 #' only that batches arrive with `from_id` and `to_id` columns.
 #'
+#' The network's nodes are the stream's endpoints. Labels travel beside the
+#' stream as a lookup keyed by `int_ids`; mapping cell IDs to those integers
+#' (a store's node sidecar, say) is the caller's business, and nothing here
+#' reads it. The lookup may cover more ids than the stream uses -- a node with
+#' no edges is not in the network and does not enter the null -- but every
+#' endpoint needs a label.
+#'
 #' Ownership of the stream moves to Rust, which releases it when the last
 #' batch has been pulled. Pass a fresh stream per call.
 #'
 #' @param edges anything [nanoarrow::as_nanoarrow_array_stream()] accepts --
 #'   an `arrow::RecordBatchReader`, `Table`, or `Dataset` query. Batches must
 #'   carry integer `from_id` and `to_id` columns.
-#' @param int_ids integer node universe, in the same order as `cell_type`.
-#'   Every edge endpoint must appear in it. Gaps are fine: the ids are
-#'   remapped onto a dense range, so a subsetted universe works unchanged.
-#'   [edge_store_nodes()] returns this for a store.
+#' @param int_ids integer ids keying the label lookup, in the same order as
+#'   `cell_type`, without duplicates. Every edge endpoint must appear; ids the
+#'   stream never uses are ignored.
 #' @param cell_type factor or character vector of labels, one per entry of
 #'   `int_ids`.
 #' @param size motif size: 2, 3 or 4.
@@ -571,8 +577,7 @@ edge_store_nodes <- function(nodes_path) {
 #' @param null `"label"` or `"conditional"`.
 #' @param cond_temp Metropolis temperature for the conditional null.
 #' @returns a `data.table` in the same shape as [motif_enrichment_rs()].
-#' @seealso [motif_enrichment_edge_store()] for the path-based form,
-#'   [edge_store_nodes()] for the node universe.
+#' @seealso [motif_enrichment_edge_store()] for the path-based form.
 #' @export
 motif_enrichment_stream <- function(edges,
                                     int_ids,

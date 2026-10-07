@@ -9,7 +9,7 @@
 
 use std::fs::File;
 
-use ahash::AHashMap;
+use ahash::{AHashMap, AHashSet};
 use arrow::ffi_stream::{ArrowArrayStreamReader, FFI_ArrowArrayStream};
 use arrow::array::{Array, Int32Array, Int64Array, StringArray};
 use arrow::datatypes::DataType;
@@ -202,54 +202,74 @@ pub fn graph_from_edge_store(
 ///
 /// `stream_addr` is the address of a populated `ArrowArrayStream` struct whose
 /// ownership moves here; the reader releases it on drop. The stream must yield
-/// integer `from_id` / `to_id` columns. `int_ids` gives the node universe in
-/// the same order as `colors`, exactly as the sidecar does on the path side.
+/// integer `from_id` / `to_id` columns.
+///
+/// The node set is the stream's endpoints -- the producer decides which cells
+/// are in the network. `int_ids` / `colors` are a label lookup, not the node
+/// set: they may cover more ids than the stream uses, and an endpoint missing
+/// from them is an error. Nodes are numbered in ascending `int_id` order, not
+/// arrival order, because batch order from a multi-file dataset is not fixed
+/// and the null permutes over node positions.
 pub fn graph_from_edge_stream(
     stream_addr: usize,
     int_ids: Vec<u32>,
     colors: Vec<u32>,
     color_levels: Vec<String>,
 ) -> Result<SpatialGraphRs, String> {
-    let n = int_ids.len();
-    if colors.len() != n {
+    if colors.len() != int_ids.len() {
         return Err(format!(
-            "colors length {} != node count {}",
+            "colors length {} != int_ids length {}",
             colors.len(),
-            n
+            int_ids.len()
         ));
     }
     if stream_addr == 0 {
         return Err("the ArrowArrayStream pointer is null".to_string());
     }
 
-    // int_id -> dense position; same contract as the path reader, so an id
-    // universe with gaps (a subset store) works unchanged
-    let mut dense: AHashMap<u32, u32> = AHashMap::with_capacity(n);
-    for (pos, &iid) in int_ids.iter().enumerate() {
-        dense.insert(iid, pos as u32);
+    let mut label: AHashMap<u32, u32> = AHashMap::with_capacity(int_ids.len());
+    for (&iid, &c) in int_ids.iter().zip(colors.iter()) {
+        if label.insert(iid, c).is_some() {
+            return Err(format!("int_id {} appears more than once in the label lookup", iid));
+        }
     }
 
     let raw = stream_addr as *mut FFI_ArrowArrayStream;
     let reader = unsafe { ArrowArrayStreamReader::from_raw(raw) }
         .map_err(|e| format!("could not import the Arrow stream: {}", e))?;
 
-    let mut sources = Vec::new();
-    let mut targets = Vec::new();
+    // Endpoints are collected as raw ids and renumbered in place once the
+    // node set is known, so peak memory stays at one u32 per endpoint plus a
+    // per-node map -- the same as translating on arrival.
+    let mut sources: Vec<u32> = Vec::new();
+    let mut targets: Vec<u32> = Vec::new();
+    let mut seen: AHashSet<u32> = AHashSet::new();
     for batch in reader {
         let b = batch.map_err(|e| format!("could not pull an Arrow batch: {}", e))?;
         let f = col_ints(&b, "from_id")?;
         let t = col_ints(&b, "to_id")?;
-        for i in 0..b.num_rows() {
-            let (a, c) = (f[i], t[i]);
-            let si = *dense
-                .get(&a)
-                .ok_or_else(|| format!("edge from_id {} not in the node sidecar", a))?;
-            let ti = *dense
-                .get(&c)
-                .ok_or_else(|| format!("edge to_id {} not in the node sidecar", c))?;
-            sources.push(si);
-            targets.push(ti);
-        }
+        seen.extend(f.iter().copied());
+        seen.extend(t.iter().copied());
+        sources.extend(f);
+        targets.extend(t);
     }
-    SpatialGraphRs::build_coded(n, colors, color_levels, &sources, &targets)
+
+    let mut nodes: Vec<u32> = seen.into_iter().collect();
+    nodes.sort_unstable();
+    let n = nodes.len();
+    let mut dense: AHashMap<u32, u32> = AHashMap::with_capacity(n);
+    let mut node_colors: Vec<u32> = Vec::with_capacity(n);
+    for (pos, &iid) in nodes.iter().enumerate() {
+        let c = *label
+            .get(&iid)
+            .ok_or_else(|| format!("edge endpoint int_id {} has no label", iid))?;
+        dense.insert(iid, pos as u32);
+        node_colors.push(c);
+    }
+    drop(nodes);
+    drop(label);
+    for v in sources.iter_mut().chain(targets.iter_mut()) {
+        *v = dense[v];
+    }
+    SpatialGraphRs::build_coded(n, node_colors, color_levels, &sources, &targets)
 }

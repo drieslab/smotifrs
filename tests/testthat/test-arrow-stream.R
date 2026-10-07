@@ -20,6 +20,9 @@ test_that("a stream gives the same answer as the same edges by path", {
     g <- igraph::sample_gnp(n, 0.06)
     el <- igraph::as_edgelist(g, names = FALSE)
     ct <- factor(sample(c("A", "B", "C"), n, TRUE))
+    # the path reader's node set is every sidecar row; the stream's is the
+    # edges' endpoints. They coincide only with no isolated node.
+    expect_true(all(igraph::degree(g) > 0L))
 
     d <- withr::local_tempdir()
     dir.create(file.path(d, "nodes")); dir.create(file.path(d, "edges"))
@@ -83,7 +86,7 @@ test_that("a multi-batch stream is pulled to exhaustion", {
     expect_equal(a$observed, b$observed)
 })
 
-test_that("a gappy node universe is remapped, not rejected", {
+test_that("gappy ids are remapped, not rejected", {
     skip_if_no_stream()
     ints <- c(3L, 9L, 14L, 20L)          # deliberately non-contiguous
     ct <- factor(c("A", "B", "A", "B"))
@@ -92,17 +95,67 @@ test_that("a gappy node universe is remapped, not rejected", {
     expect_gt(nrow(r), 0L)
 })
 
-test_that("an endpoint outside the node universe is an error", {
+test_that("the node set is the stream's endpoints, not the label lookup", {
+    skip_if_no_stream()
+    set.seed(4)
+    n <- 90L
+    el <- igraph::as_edgelist(igraph::sample_gnp(n, 0.08), names = FALSE)
+    used <- sort(unique(c(el)))
+    ct_all <- factor(sample(c("A", "B", "C"), n, TRUE))
+
+    # a lookup over every id, plus ids no edge reaches, against one over the
+    # endpoints only: same network, same null
+    extra <- c(seq_len(n), 1000L + seq_len(25L))
+    ct_extra <- factor(c(as.character(ct_all), rep("C", 25L)),
+                       levels = levels(ct_all))
+    a <- motif_enrichment_stream(.edges_tbl(el[, 1], el[, 2]), extra, ct_extra,
+                                 size = 3L, n_perm = 29L, seed = 3L)
+    b <- motif_enrichment_stream(.edges_tbl(el[, 1], el[, 2]), used,
+                                 ct_all[used], size = 3L, n_perm = 29L, seed = 3L)
+    data.table::setorder(a, motif_id); data.table::setorder(b, motif_id)
+    expect_identical(a$motif_id, b$motif_id)
+    expect_equal(a$observed, b$observed)
+    expect_equal(a$p_enrich, b$p_enrich)
+})
+
+test_that("node numbering does not depend on edge order", {
+    skip_if_no_stream()
+    set.seed(5)
+    n <- 70L
+    el <- igraph::as_edgelist(igraph::sample_gnp(n, 0.1), names = FALSE)
+    ct <- factor(sample(c("A", "B"), n, TRUE))
+    rev_el <- el[rev(seq_len(nrow(el))), ]
+    a <- motif_enrichment_stream(.edges_tbl(el[, 1], el[, 2]), seq_len(n), ct,
+                                 size = 3L, n_perm = 29L, seed = 2L)
+    b <- motif_enrichment_stream(.edges_tbl(rev_el[, 1], rev_el[, 2]),
+                                 seq_len(n), ct,
+                                 size = 3L, n_perm = 29L, seed = 2L)
+    data.table::setorder(a, motif_id); data.table::setorder(b, motif_id)
+    expect_equal(a$p_enrich, b$p_enrich)
+    expect_equal(a$expected, b$expected)
+})
+
+test_that("an endpoint without a label is an error", {
     skip_if_no_stream()
     expect_error(
         motif_enrichment_stream(.edges_tbl(c(1L, 2L), c(2L, 99L)),
                                 int_ids = 1:3, cell_type = factor(c("A","B","A")),
                                 size = 3L, n_perm = 9L),
-        "not in the node sidecar"
+        "int_id 99 has no label"
     )
 })
 
-test_that("cell_type must match the node universe", {
+test_that("a duplicated id in the label lookup is an error", {
+    skip_if_no_stream()
+    expect_error(
+        motif_enrichment_stream(.edges_tbl(1L, 2L), int_ids = c(1L, 2L, 2L),
+                                cell_type = factor(c("A", "B", "A")),
+                                size = 2L, n_perm = 9L),
+        "appears more than once"
+    )
+})
+
+test_that("cell_type must match int_ids", {
     skip_if_no_stream()
     expect_error(
         motif_enrichment_stream(.edges_tbl(1L, 2L), int_ids = 1:3,
