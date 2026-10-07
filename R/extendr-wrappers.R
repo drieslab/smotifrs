@@ -43,6 +43,16 @@ rs_motif_instances <- function(n_nodes, type_codes, type_levels, edge_source, ed
 #' @keywords internal
 rs_motif_enrichment_edge_store <- function(nodes_path, edges_path, type_codes, type_levels, size, n_perm, seed, null_kind, cond_temp) .Call(wrap__rs_motif_enrichment_edge_store, nodes_path, edges_path, type_codes, type_levels, size, n_perm, seed, null_kind, cond_temp)
 
+#' Internal FFI: motif enrichment over an Arrow stream of edges.
+#'
+#' The stream producer -- {GiottoDisk}'s
+#' `storeRead(<parquetEdgeStore>, output = "arrowstream")`, or anything else
+#' that speaks Arrow -- has already applied whatever narrowing it owes, so a
+#' pending subset is honoured without this package knowing what a store is.
+#'
+#' @keywords internal
+rs_motif_enrichment_stream <- function(stream_addr, int_ids, type_codes, type_levels, size, n_perm, seed, null_kind, cond_temp) .Call(wrap__rs_motif_enrichment_stream, stream_addr, int_ids, type_codes, type_levels, size, n_perm, seed, null_kind, cond_temp)
+
 #' Internal FFI: node ids and int codes from a `parquetEdgeStore` sidecar.
 #'
 #' @keywords internal

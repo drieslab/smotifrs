@@ -537,3 +537,88 @@ edge_store_nodes <- function(nodes_path) {
   r <- rs_edge_store_nodes(path.expand(nodes_path))
   data.table::data.table(node_id = r$node_id, int_id = r$int_id)
 }
+
+
+#' Motif enrichment over an Arrow stream of edges
+#'
+#' Runs the enrichment against edges pulled from an Arrow stream rather than
+#' read from a file path, so the producer decides what the edge set *is*.
+#'
+#' [motif_enrichment_edge_store()] opens a store's parquet files directly,
+#' which means it sees them as they sit on disk. That is wrong whenever the
+#' caller's view of the store differs from its files: a `parquetEdgeStore`
+#' carrying a pending subset, a dataset written across several files, or a
+#' query over something that is not parquet at all. A stream moves that
+#' decision to the producer --
+#' `GiottoDisk::storeRead(x, output = "arrowstream")` applies a store's
+#' pending ops before yielding any batch -- and leaves this package knowing
+#' only that batches arrive with `from_id` and `to_id` columns.
+#'
+#' The network's nodes are the stream's endpoints. Labels travel beside the
+#' stream as a lookup keyed by `int_ids`; mapping cell IDs to those integers
+#' (a store's node sidecar, say) is the caller's business, and nothing here
+#' reads it. The lookup may cover more ids than the stream uses -- a node with
+#' no edges is not in the network and does not enter the null -- but every
+#' endpoint needs a label.
+#'
+#' Ownership of the stream moves to Rust, which releases it when the last
+#' batch has been pulled. Pass a fresh stream per call.
+#'
+#' @param edges anything [nanoarrow::as_nanoarrow_array_stream()] accepts --
+#'   an `arrow::RecordBatchReader`, `Table`, or `Dataset` query. Batches must
+#'   carry integer `from_id` and `to_id` columns.
+#' @param int_ids integer ids keying the label lookup, in the same order as
+#'   `cell_type`, without duplicates. Every edge endpoint must appear; ids the
+#'   stream never uses are ignored.
+#' @param cell_type factor or character vector of labels, one per entry of
+#'   `int_ids`.
+#' @param size motif size: 2, 3 or 4.
+#' @param n_perm,seed permutation count and seed.
+#' @param null `"label"` or `"conditional"`.
+#' @param cond_temp Metropolis temperature for the conditional null.
+#' @returns a `data.table` in the same shape as [motif_enrichment_rs()].
+#' @seealso [motif_enrichment_edge_store()] for the path-based form.
+#' @export
+motif_enrichment_stream <- function(edges,
+                                    int_ids,
+                                    cell_type,
+                                    size = 3L,
+                                    n_perm = 1000L,
+                                    seed = 1L,
+                                    null = c("label", "conditional"),
+                                    cond_temp = 1) {
+  if (!requireNamespace("nanoarrow", quietly = TRUE)) {
+    stop("motif_enrichment_stream() needs the nanoarrow package",
+         call. = FALSE)
+  }
+  null <- match.arg(null)
+  size <- as.integer(size)
+  if (!size %in% 2:4) stop("size must be 2, 3 or 4", call. = FALSE)
+
+  int_ids <- as.integer(int_ids)
+  ct <- if (is.factor(cell_type)) cell_type else factor(cell_type)
+  if (length(ct) != length(int_ids)) {
+    stop(sprintf("cell_type has %d entries but int_ids has %d",
+                 length(ct), length(int_ids)), call. = FALSE)
+  }
+
+  # Move the stream into a struct Rust owns. Handing over the caller's own
+  # handle would leave two owners holding one release callback.
+  owned <- nanoarrow::nanoarrow_allocate_array_stream()
+  nanoarrow::nanoarrow_pointer_move(
+    nanoarrow::as_nanoarrow_array_stream(edges), owned
+  )
+
+  rs <- rs_motif_enrichment_stream(
+    stream_addr = nanoarrow::nanoarrow_pointer_addr_dbl(owned),
+    int_ids = int_ids,
+    type_codes = as.integer(ct),
+    type_levels = levels(ct),
+    size = size,
+    n_perm = as.integer(n_perm),
+    seed = as.integer(seed),
+    null_kind = null,
+    cond_temp = as.numeric(cond_temp)
+  )
+  .rs_enrichment_to_dt(rs, null, cond_temp)
+}

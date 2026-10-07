@@ -276,47 +276,7 @@ fn rs_motif_enrichment(
     )
     .map_err(Error::Other)?;
 
-    let k = size as usize;
-    let nclass = r.observed.len();
-    // colors flattened row-major, k per class; R reshapes to a matrix
-    let mut colors_flat: Vec<Rstr> = Vec::with_capacity(nclass * k);
-    let mut motif_id: Vec<String> = Vec::with_capacity(nclass);
-    for (i, cc) in r.color_codes.iter().enumerate() {
-        let names: Vec<&str> = cc
-            .iter()
-            .map(|&c| g.color_levels[c as usize].as_str())
-            .collect();
-        for nm in &names {
-            colors_flat.push(Rstr::from(*nm));
-        }
-        motif_id.push(format!(
-            "size{}_{}_{}",
-            k,
-            r.topo_name[i],
-            names.join("-")
-        ));
-    }
-
-    Ok(list!(
-        motif_id = motif_id,
-        topology = r.topo_name.clone(),
-        size = vec![size; nclass],
-        color_flat = Strings::from_values(colors_flat),
-        observed = r.observed.clone(),
-        mean_null = r.mean_null.clone(),
-        sd_null = r.sd_null.clone(),
-        p_enrich = r.p_enrich.clone(),
-        p_deplete = r.p_deplete.clone(),
-        n_instances = r.n_instances as f64,
-        n_perm = n_perm,
-        k = size,
-        cond_dev = r.cond_dev,
-        n_edges = r.n_edges as f64,
-        cond_accept = r.cond_accept,
-        cond_moved = r.cond_moved,
-        cond_moves_per_draw = r.cond_moves_per_draw,
-        n_nodes_out = n_nodes
-    ))
+    Ok(enrichment_to_list(&g, &r, size, n_perm, n_nodes))
 }
 
 /// Internal FFI: vertices of instances belonging to named motif classes.
@@ -355,6 +315,104 @@ fn rs_motif_instances(
         which = which.iter().map(|w| *w as i32 + 1).collect::<Vec<i32>>(),
         k = size
     ))
+}
+
+// The per-class result table the enrichment entry points return. Extracted
+// when the Arrow-stream path would otherwise have made a third verbatim copy.
+fn enrichment_to_list(
+    g: &crate::graph::SpatialGraphRs,
+    r: &crate::enrich::EnrichOut,
+    size: i32,
+    n_perm: i32,
+    n_nodes_out: i32,
+) -> List {
+    let k = size as usize;
+    let nclass = r.observed.len();
+    // colors flattened row-major, k per class; R reshapes to a matrix
+    let mut colors_flat: Vec<Rstr> = Vec::with_capacity(nclass * k);
+    let mut motif_id: Vec<String> = Vec::with_capacity(nclass);
+    for (i, cc) in r.color_codes.iter().enumerate() {
+        let names: Vec<&str> = cc
+            .iter()
+            .map(|&c| g.color_levels[c as usize].as_str())
+            .collect();
+        for nm in &names {
+            colors_flat.push(Rstr::from(*nm));
+        }
+        motif_id.push(format!("size{}_{}_{}", k, r.topo_name[i], names.join("-")));
+    }
+    list!(
+        motif_id = motif_id,
+        topology = r.topo_name.clone(),
+        size = vec![size; nclass],
+        color_flat = Strings::from_values(colors_flat),
+        observed = r.observed.clone(),
+        mean_null = r.mean_null.clone(),
+        sd_null = r.sd_null.clone(),
+        p_enrich = r.p_enrich.clone(),
+        p_deplete = r.p_deplete.clone(),
+        n_instances = r.n_instances as f64,
+        n_perm = n_perm,
+        k = size,
+        cond_dev = r.cond_dev,
+        n_edges = r.n_edges as f64,
+        cond_accept = r.cond_accept,
+        cond_moved = r.cond_moved,
+        cond_moves_per_draw = r.cond_moves_per_draw,
+        n_nodes_out = n_nodes_out
+    )
+}
+
+/// Internal FFI: motif enrichment over an Arrow stream of edges.
+///
+/// The stream producer -- {GiottoDisk}'s
+/// `storeRead(<parquetEdgeStore>, output = "arrowstream")`, or anything else
+/// that speaks Arrow -- has already applied whatever narrowing it owes, so a
+/// pending subset is honoured without this package knowing what a store is.
+///
+/// @keywords internal
+#[extendr]
+#[allow(clippy::too_many_arguments)]
+fn rs_motif_enrichment_stream(
+    stream_addr: f64,
+    int_ids: Integers,
+    type_codes: Integers,
+    type_levels: Vec<String>,
+    size: i32,
+    n_perm: i32,
+    seed: i32,
+    null_kind: &str,
+    cond_temp: f64,
+) -> Result<List> {
+    if !(2..=4).contains(&size) {
+        return Err(Error::Other(format!("size must be 2, 3 or 4; got {}", size)));
+    }
+    if type_codes.len() != int_ids.len() {
+        return Err(Error::Other(format!(
+            "type_codes length {} != int_ids length {}",
+            type_codes.len(),
+            int_ids.len()
+        )));
+    }
+    let colors: Vec<u32> = type_codes.iter().map(|i| (i.0 - 1) as u32).collect();
+    // raw ids, not 1-based R positions: `integers_to_u32` is for the latter
+    let ints: Vec<u32> = int_ids.iter().map(|i| i.0 as u32).collect();
+    let g = parquet_io::graph_from_edge_stream(stream_addr as usize, ints, colors, type_levels)
+        .map_err(Error::Other)?;
+    let nk = match null_kind {
+        "label" => crate::enrich::NullKind::Label,
+        "conditional" => crate::enrich::NullKind::Conditional,
+        other => {
+            return Err(Error::Other(format!(
+                "unknown null '{}' for the Arrow-stream path", other
+            )))
+        }
+    };
+    let r = crate::enrich::run_enrichment(
+        &g, size as usize, n_perm as usize, seed as u64, None, None, nk, cond_temp,
+    )
+    .map_err(Error::Other)?;
+    Ok(enrichment_to_list(&g, &r, size, n_perm, g.n_nodes as i32))
 }
 
 /// Internal FFI: motif enrichment read straight from a GiottoDisk
@@ -399,40 +457,7 @@ fn rs_motif_enrichment_edge_store(
     )
     .map_err(Error::Other)?;
 
-    let k = size as usize;
-    let nclass = r.observed.len();
-    let mut colors_flat: Vec<Rstr> = Vec::with_capacity(nclass * k);
-    let mut motif_id: Vec<String> = Vec::with_capacity(nclass);
-    for (i, cc) in r.color_codes.iter().enumerate() {
-        let names: Vec<&str> = cc
-            .iter()
-            .map(|&c| g.color_levels[c as usize].as_str())
-            .collect();
-        for nm in &names {
-            colors_flat.push(Rstr::from(*nm));
-        }
-        motif_id.push(format!("size{}_{}_{}", k, r.topo_name[i], names.join("-")));
-    }
-    Ok(list!(
-        motif_id = motif_id,
-        topology = r.topo_name.clone(),
-        size = vec![size; nclass],
-        color_flat = Strings::from_values(colors_flat),
-        observed = r.observed.clone(),
-        mean_null = r.mean_null.clone(),
-        sd_null = r.sd_null.clone(),
-        p_enrich = r.p_enrich.clone(),
-        p_deplete = r.p_deplete.clone(),
-        n_instances = r.n_instances as f64,
-        n_perm = n_perm,
-        k = size,
-        cond_dev = r.cond_dev,
-        n_edges = r.n_edges as f64,
-        cond_accept = r.cond_accept,
-        cond_moved = r.cond_moved,
-        cond_moves_per_draw = r.cond_moves_per_draw,
-        n_nodes_out = g.n_nodes as i32
-    ))
+    Ok(enrichment_to_list(&g, &r, size, n_perm, g.n_nodes as i32))
 }
 
 /// Internal FFI: node ids and int codes from a `parquetEdgeStore` sidecar.
@@ -464,5 +489,6 @@ extendr_module! {
     fn rs_motif_enrichment;
     fn rs_motif_instances;
     fn rs_motif_enrichment_edge_store;
+    fn rs_motif_enrichment_stream;
     fn rs_edge_store_nodes;
 }
