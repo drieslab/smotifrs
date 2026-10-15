@@ -34,16 +34,16 @@ analyses, `smotifrs` for the Rust kernels.
 
 ```r
 # 1. Install smotif (R-only, fast)
-remotes::install_github("rdries/smotif")
+remotes::install_github("drieslab/smotif")
 
 # 2. Install smotifrs — RECOMMENDED: pre-built binary (no Rust toolchain)
 install.packages(
   "smotifrs",
-  repos = c("https://rdries.r-universe.dev", getOption("repos"))
+  repos = c("https://drieslab.r-universe.dev", getOption("repos"))
 )
 
 # 2a. Source install (only if you have cargo + rustc on your PATH)
-# remotes::install_github("rdries/smotifrs")
+# remotes::install_github("drieslab/smotifrs")
 ```
 
 The R-universe path downloads a pre-compiled `.so` / `.dylib` / `.dll`
