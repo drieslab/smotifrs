@@ -368,16 +368,16 @@ closes the tutorial.</p>
 <p>Both packages are needed: <code>smotif</code> for the data model and
 downstream analyses, <code>smotifrs</code> for the Rust kernels.</p>
 <pre class="r"><code># 1. Install smotif (R-only, fast)
-remotes::install_github(&quot;rdries/smotif&quot;)
+remotes::install_github(&quot;drieslab/smotif&quot;)
 
 # 2. Install smotifrs — RECOMMENDED: pre-built binary (no Rust toolchain)
 install.packages(
   &quot;smotifrs&quot;,
-  repos = c(&quot;https://rdries.r-universe.dev&quot;, getOption(&quot;repos&quot;))
+  repos = c(&quot;https://drieslab.r-universe.dev&quot;, getOption(&quot;repos&quot;))
 )
 
 # 2a. Source install (only if you have cargo + rustc on your PATH)
-# remotes::install_github(&quot;rdries/smotifrs&quot;)</code></pre>
+# remotes::install_github(&quot;drieslab/smotifrs&quot;)</code></pre>
 <p>The R-universe path downloads a pre-compiled <code>.so</code> /
 <code>.dylib</code> / <code>.dll</code> matching your platform, so users
 who don’t want to deal with Rust never have to. Source builds remain
