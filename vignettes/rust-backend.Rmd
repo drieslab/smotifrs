@@ -8,9 +8,13 @@ vignette: >
 ---
 
 ```{r setup, include = FALSE}
+# smotif and ggplot2 are Suggests; skip evaluation where they are absent
+# so the vignette still builds (smotif in turn Suggests smotifrs).
 knitr::opts_chunk$set(
   collapse = TRUE, comment = "#>",
-  fig.width = 7, fig.height = 4
+  fig.width = 7, fig.height = 4,
+  eval = requireNamespace("smotif", quietly = TRUE) &&
+    requireNamespace("ggplot2", quietly = TRUE)
 )
 ```
 
