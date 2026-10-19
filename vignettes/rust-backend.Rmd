@@ -128,73 +128,25 @@ both backends at sizes 3 and 4. The R-side memory peak is read from
 `gc()`'s `"max used"` column and tells a clean story: the Rust backend
 keeps the graph out of R's heap, so it costs near-zero R memory.
 
-```{r helpers}
-make_synthetic <- function(n, k = 6L, seed = 1L) {
-  set.seed(seed)
-  coords <- cbind(x = stats::runif(n, 0, 1000),
-                  y = stats::runif(n, 0, 1000))
-  types <- sample(c("T", "B", "M", "E", "X"), n, replace = TRUE)
-  build_spatial_graph(
-    coords, types, "synth",
-    cell_id = paste0("c", seq_len(n)),
-    method = "knn", k = k
-  )
-}
+The benchmark takes about 15 minutes and 6 GB, so it is not run when
+this vignette builds. The numbers below come from
+[`data-raw/bench-rust-backend.R`](https://github.com/drieslab/smotifrs/blob/main/data-raw/bench-rust-backend.R),
+which CI re-runs on each release (or on demand) and commits to
+`vignettes/bench/`. Each time is the median of several repetitions.
+Absolute times depend on the machine; the rust/igraph speedup is the
+stable comparison.
 
-peak_mb_from_gc <- function(g) {
-  # Robust across R versions: locate the "max used" column and read
-  # the Mb counterpart immediately after it.
-  i <- which(colnames(g) == "max used")
-  if (!length(i) || ncol(g) < i + 1L) return(NA_real_)
-  sum(g[, i + 1L])
-}
-
-bench_one <- function(label, fn) {
-  invisible(gc(reset = TRUE, full = TRUE))
-  t1 <- Sys.time()
-  # Keep the result alive until t2 so its allocation is captured by gc().
-  result_holder <- fn()
-  t2 <- Sys.time()
-  g <- gc(verbose = FALSE)
-  rm(result_holder)
-  data.frame(
-    label     = label,
-    elapsed   = as.numeric(difftime(t2, t1, units = "s")),
-    r_peak_mb = peak_mb_from_gc(g)
-  )
-}
+```{r bench-load}
+bench <- data.table::fread(file.path("bench", "results.csv"))
+bench[, sz_name := factor(sz_name, levels = c("small", "medium", "large"))]
+meta <- as.list(read.dcf(file.path("bench", "meta.dcf"))[1L, ])
 ```
 
-```{r benchmarks, results = "hide"}
-sizes <- c(small = 2500L, medium = 10000L, large = 30000L)
-out <- list()
-for (sz_name in names(sizes)) {
-  n <- sizes[[sz_name]]
-  message("building synthetic graph: ", n, " cells")
-  sg_n <- make_synthetic(n)
-  for (motif_size in c(3L, 4L)) {
-    out[[length(out) + 1L]] <- transform(
-      bench_one(
-        sprintf("%s/N=%d/size=%d/igraph", sz_name, n, motif_size),
-        function() find_motifs(sg_n, size = motif_size, backend = "igraph")
-      ),
-      backend = "igraph", N = n, motif_size = motif_size, sz_name = sz_name
-    )
-    out[[length(out) + 1L]] <- transform(
-      bench_one(
-        sprintf("%s/N=%d/size=%d/rust", sz_name, n, motif_size),
-        function() find_motifs(sg_n, size = motif_size, backend = "rust")
-      ),
-      backend = "rust", N = n, motif_size = motif_size, sz_name = sz_name
-    )
-  }
-}
-bench <- do.call(rbind, out)
-bench$sz_name <- factor(bench$sz_name, levels = names(sizes))
-```
+Measured at smotifrs commit `r meta$commit` on `r meta$date`
+(`r meta$machine`, `r meta$cpu`, `r meta$cores` cores; R `r meta$R`,
+`r meta$rustc`; median of `r meta$reps` runs).
 
 ```{r bench-table}
-data.table::setDT(bench)
 bench[, .(label, elapsed_s = round(elapsed, 2),
           r_peak_mb = round(r_peak_mb, 1))]
 ```
