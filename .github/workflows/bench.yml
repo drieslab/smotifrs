@@ -37,6 +37,10 @@ jobs:
         with:
           dependencies: '"hard"'
           extra-packages: any::FNN, smotif
+          # The auto-detect resolves every Suggests (GiottoDisk is on no
+          # repo the runner sees); nothing here renders documents.
+          install-pandoc: false
+          install-quarto: false
 
       - name: Install smotifrs from this commit
         run: R CMD INSTALL .
