@@ -18,6 +18,7 @@ Imports:
     data.table
 Suggests:
     arrow,
+    FNN,
     GiottoDisk,
     igraph,
     ggplot2,
