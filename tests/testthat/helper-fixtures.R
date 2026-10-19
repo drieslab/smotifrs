@@ -3,6 +3,8 @@
 
 skip_if_no_smotif <- function() {
   testthat::skip_if_not_installed("smotif")
+  # The fixtures build kNN graphs, which smotif implements with FNN.
+  testthat::skip_if_not_installed("FNN")
 }
 
 # Random scattered cells in a unit square; kNN graph; mixed cell types.
