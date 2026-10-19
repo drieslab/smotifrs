@@ -1,0 +1,10 @@
+commit: d826aff
+date: 2026-10-19
+machine: local
+cpu: Apple M3 Max
+cores: 16
+reps: 3
+R: 4.5.2
+rustc: rustc 1.96.0 (ac68faa20 2026-05-25)
+smotif: 0.2.0
+smotifrs: 0.2.0
